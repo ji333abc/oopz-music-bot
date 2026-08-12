@@ -57,7 +57,7 @@ OOPZ_JWT_TOKEN=
 | `QQ_MUSIC_QUALITY` | `320` | 主音质：`m4a/128/320/ape/flac` |
 | `QQ_MUSIC_FALLBACK_QUALITY` | `128` | 主地址不可用时的音质 |
 
-音乐 API 不在本项目内启动。Docker 中访问宿主机服务时使用 `http://host.docker.internal:3200`。
+`QQ_MUSIC_BASE_URL` 应指向可访问的兼容音乐 API。Docker 中访问宿主机服务时使用 `http://host.docker.internal:3200`。
 
 ## 可选后台任务
 

@@ -2,7 +2,7 @@
 
 一个可自托管的 QQ 群音乐机器人：群成员通过 `@机器人` 点歌，机器人搜索歌曲、维护队列，并把音频推送到指定的 OOPZ 语音频道。
 
-这个仓库是独立运行项目，不需要复制到另一套 Bot 源码中。控制面板和网页播放器已移除，所有操作都通过 QQ 群命令完成。
+机器人通过 QQ 群命令交互，支持 Docker Compose、systemd 和本地 Python 环境部署。
 
 ## 能力
 
@@ -27,7 +27,7 @@ flowchart LR
     SDK --> Voice["OOPZ / Agora 语音频道"]
 ```
 
-机器人、内部 API、队列和 OOPZ SDK 运行在同一个 Python 进程中。内部桥接固定监听回环地址，不需要开放公网端口。QQ 音乐接口作为独立 HTTP 服务配置，本仓库不包含该服务端。
+机器人、内部 API、队列和 OOPZ SDK 运行在同一个 Python 进程中。内部桥接固定监听回环地址。音乐数据由 `QQ_MUSIC_BASE_URL` 配置的兼容 HTTP API 提供。
 
 详细设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
@@ -106,7 +106,7 @@ QQBOT_OOPZ_VOICE_CHANNEL_ID=
 QQ_MUSIC_BASE_URL=http://127.0.0.1:3200
 ```
 
-完整说明见 [docs/CONFIGURATION.md](docs/CONFIGURATION.md)。真实 `.env`、Cookie、Token、日志和运行数据已被 Git 忽略。
+完整说明见 [docs/CONFIGURATION.md](docs/CONFIGURATION.md)。Git 忽略规则覆盖 `.env`、Cookie、Token、日志和运行数据。
 
 ## 群命令
 
@@ -156,4 +156,4 @@ npm test --prefix tools/qqbot-uploader
 
 [MIT](LICENSE)
 
-本项目使用但不复制 OOPZ SDK、QQ Bot SDK 和音乐接口服务的源码。第三方组件仍适用各自许可证；音乐接口服务需由部署者自行选择和审查。
+OOPZ SDK、QQ Bot SDK 及其他第三方组件适用各自许可证；兼容音乐接口由部署者自行选择并审查。

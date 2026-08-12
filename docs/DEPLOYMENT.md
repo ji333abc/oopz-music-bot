@@ -22,7 +22,7 @@ docker compose up -d --build
 docker compose down
 ```
 
-容器只需要出站网络，不需要映射端口。运行数据挂载到仓库的 `data/`。
+容器通过出站网络连接 QQ、OOPZ 和音乐接口，不映射主机端口。运行数据挂载到仓库的 `data/`。
 
 ## systemd
 
