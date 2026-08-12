@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+.verify-venv/
+.verify-jm-venv/
+.playwright/
+venv/
+*.egg-info/
+build/
+wheelhouse/
+
+# Node.js and frontend build output
+node_modules/
+.next/
+.vinext/
+dist/
+coverage/
+.test-uploads-*/
+.wrangler/
+.npm-cache/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.htpasswd
+
+# Runtime data and logs
+data/
+logs/
+*.log
+*.pid
+*.sqlite
+*.sqlite3
+*.db
+jm-tasks/
+
+# Deployment artifacts
+deploy-packages/
+oopz-selfhost-update-*.tar.gz
+*.zip
+
+# Editor and operating-system files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

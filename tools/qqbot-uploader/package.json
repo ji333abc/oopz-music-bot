@@ -1,0 +1,16 @@
+{
+  "name": "oopz-qqbot-uploader",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Isolated QQ Bot local-file uploader for Oopzbot",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test uploader.test.mjs"
+  },
+  "dependencies": {
+    "@tencent-connect/qqbot-nodejs": "1.0.4"
+  }
+}

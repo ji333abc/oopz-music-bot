@@ -1,0 +1,16 @@
+.git
+.env
+__pycache__
+*.py[cod]
+.venv
+.verify-venv
+.verify-jm-venv
+.playwright
+build
+wheelhouse
+*.egg-info
+data
+deploy-packages
+oopz-selfhost-update-*.tar.gz
+tests
+docs

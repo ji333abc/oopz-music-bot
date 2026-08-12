@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oopz-music-bot"
+version = "0.1.0"
+description = "Self-hosted QQ music bot for OOPZ voice channels"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "OOPZ Music Bot contributors" }]
+keywords = ["oopz", "qqbot", "music-bot"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+  "fastapi>=0.115,<1",
+  "oopz-sdk>=0.13.1,<1",
+  "python-dotenv>=1.0,<2",
+  "qq-botpy==1.2.1",
+  "requests>=2.27,<3",
+  "uvicorn>=0.30,<1",
+]
+
+[project.optional-dependencies]
+jm = [
+  "img2pdf>=0.6,<1",
+  "jmcomic==2.7.2",
+  "Pillow>=10,<13",
+  "pyzipper==0.4.0",
+]
+dev = [
+  "build>=1.2,<2",
+  "Pillow>=10,<13",
+  "ruff>=0.12,<1",
+]
+
+[project.scripts]
+oopzbot = "oopzbot.app:main"
+oopzbot-jm-worker = "oopzbot.jm_worker:main"
+
+[tool.setuptools.packages.find]
+include = ["oopzbot*"]
+
+[tool.setuptools.package-data]
+oopzbot = ["env.example"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = ["deploy-packages"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]

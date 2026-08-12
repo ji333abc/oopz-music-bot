@@ -1,0 +1,25 @@
+[Unit]
+Description=OOPZ Music Bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=oopzbot
+Group=oopzbot
+WorkingDirectory=/opt/oopz-music-bot
+EnvironmentFile=/etc/oopzbot.env
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/oopz-music-bot/.playwright
+ExecStart=/opt/oopz-music-bot/.venv/bin/oopzbot start
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/opt/oopz-music-bot/data
+
+[Install]
+WantedBy=multi-user.target
