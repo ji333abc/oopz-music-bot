@@ -2,7 +2,7 @@
 
 ## 进程模型
 
-OOPZ Music Bot 默认只启动一个 Python 进程，其中包含四个边界：
+OOPZ Music Bot 的主进程包含四个边界，并按需托管一个固定版本的 Node.js 音乐 API 子进程：
 
 ```mermaid
 flowchart TB
@@ -16,7 +16,7 @@ flowchart TB
     QQ -->|"HTTP 127.0.0.1"| API
     API --> Controller
     Controller --> Runtime
-    Controller --> MusicAPI["兼容的 QQ 音乐 API"]
+    Controller --> MusicAPI["固定版本 QQ Music API\n受控 Node.js 子进程"]
     Runtime --> OOPZ["OOPZ REST / Agora"]
     QQ --> QQCloud["QQ 官方机器人 API"]
 ```
@@ -33,6 +33,7 @@ flowchart TB
 | `oopzbot/bridge.py` | 命令解析、搜索会话、排行榜会话和鉴权 |
 | `oopzbot/controller.py` | 内存队列、播放控制和自动续播 |
 | `oopzbot/music.py` | QQ 音乐 HTTP 响应兼容和数据标准化 |
+| `oopzbot/qqmusic_service.py` | 固定版本音乐 API 的校验、启动、就绪检测与关闭 |
 | `oopzbot/runtime.py` | OOPZ SDK 的线程安全同步门面 |
 | `oopzbot/jm_worker.py` | 可选后台归档任务 |
 | `tools/qqbot-uploader/` | 可选 QQ 群文件上传器 |
@@ -67,6 +68,7 @@ sequenceDiagram
 - 队列使用可重入锁保护。
 - 播放监控线程每三秒查询播放状态，结束后自动推进队列。
 - 耗时归档任务使用独立子进程，不阻塞消息处理。
+- 本地部署由 Python 主进程托管固定版本 QQ 音乐 API 子进程；Docker 部署使用独立内部容器。
 
 ## 数据与持久化
 
@@ -79,4 +81,5 @@ sequenceDiagram
 - QQ 群可通过 `QQBOT_ALLOWED_GROUP_OPENIDS` 设置白名单。
 - 可选后台任务可另设用户白名单。
 - Secret 只从环境变量读取，不写入日志或 API 响应。
+- 音乐 API 子进程使用最小环境变量集合，不继承 QQ Bot 和 OOPZ 凭据。
 - Docker 镜像不声明对外端口。

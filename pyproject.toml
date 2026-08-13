@@ -47,7 +47,7 @@ oopzbot-jm-worker = "oopzbot.jm_worker:main"
 include = ["oopzbot*"]
 
 [tool.setuptools.package-data]
-oopzbot = ["env.example"]
+oopzbot = ["env.example", "qqmusic_launcher.cjs"]
 
 [tool.ruff]
 target-version = "py311"

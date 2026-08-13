@@ -8,6 +8,7 @@ __pycache__/
 .verify-venv/
 .verify-jm-venv/
 .playwright/
+.services/
 venv/
 *.egg-info/
 build/

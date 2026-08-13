@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import shutil
@@ -35,6 +36,12 @@ def check_config(env_file: str | None = None) -> int:
     clear_settings_cache()
     settings = get_settings()
     errors = settings.validate()
+    if settings.qq_music_enabled and settings.qq_music_managed:
+        from .qqmusic_service import managed_installation_errors, service_directory
+
+        errors.extend(
+            managed_installation_errors(service_directory(settings.qq_music_service_dir))
+        )
     if errors:
         print("配置检查失败：")
         for error in errors:
@@ -42,7 +49,8 @@ def check_config(env_file: str | None = None) -> int:
         return 1
     print("配置检查通过")
     print(f"- 内部桥接：http://{settings.bridge_host}:{settings.bridge_port}")
-    print(f"- 音乐接口：{settings.qq_music_base_url}")
+    music_mode = "固定版本自动托管" if settings.qq_music_managed else "外部服务"
+    print(f"- 音乐接口：{settings.qq_music_base_url}（{music_mode}）")
     print(f"- OOPZ 域：{settings.oopz_area_id}")
     return 0
 
@@ -69,28 +77,26 @@ def init_config(env_file: str | None = None) -> int:
     return 0
 
 
-def discover_channels(env_file: str | None = None) -> int:
+def discover_channels(
+    env_file: str | None = None,
+    *,
+    area_id: str = "",
+    areas_only: bool = False,
+    json_output: bool = False,
+) -> int:
     _load_environment(env_file)
+    from .discovery import discovery_payload, print_discovery
     from .runtime import OopzRuntime
 
     runtime = OopzRuntime()
     try:
         runtime.start()
-        areas = runtime.get_joined_areas()
-        if not areas:
-            print("当前账号没有加入任何 OOPZ 域。")
-            return 1
-        for area in areas:
-            area_id = str(area.get("id") or area.get("area_id") or "")
-            print(f"\n域：{area.get('name', '未命名')}\n  ID: {area_id}")
-            for group in runtime.get_area_channels(area_id):
-                print(f"  分组：{group.get('name', '未命名')}")
-                for channel in group.get("channels") or []:
-                    print(
-                        f"    - {channel.get('name', '未命名')} "
-                        f"[{channel.get('type', 'UNKNOWN')}] {channel.get('id', '')}"
-                    )
-        return 0
+        payload = discovery_payload(runtime, area_id=area_id, areas_only=areas_only)
+        if json_output:
+            print(json.dumps(payload, ensure_ascii=False))
+        else:
+            print_discovery(payload)
+        return 0 if payload["areas"] else 1
     finally:
         runtime.close()
 
@@ -100,6 +106,7 @@ def run(env_file: str | None = None) -> int:
     from .bridge import router, set_music_handler
     from .config import clear_settings_cache, get_settings
     from .controller import MusicController
+    from .qqmusic_service import ManagedQQMusicService
     from .runtime import OopzRuntime
 
     clear_settings_cache()
@@ -109,8 +116,14 @@ def run(env_file: str | None = None) -> int:
     if errors:
         raise SystemExit("配置无效：\n- " + "\n- ".join(errors))
 
+    music_service = ManagedQQMusicService(settings)
+    music_service.start()
     runtime = OopzRuntime()
-    runtime.start()
+    try:
+        runtime.start()
+    except Exception:
+        music_service.close()
+        raise
     controller = MusicController(settings, runtime)
     set_music_handler(controller)
 
@@ -133,6 +146,7 @@ def run(env_file: str | None = None) -> int:
         server.should_exit = True
         controller.close()
         runtime.close()
+        music_service.close()
 
     api_thread = threading.Thread(target=server.run, name="internal-api", daemon=True)
     api_thread.start()
@@ -165,7 +179,10 @@ def build_parser() -> argparse.ArgumentParser:
     subcommands.add_parser("start", help="启动机器人（默认命令）")
     subcommands.add_parser("init", help="生成 .env 和随机内部 Token")
     subcommands.add_parser("check", help="仅检查配置，不连接外部服务")
-    subcommands.add_parser("discover", help="登录 OOPZ 并列出域和频道 ID")
+    discover = subcommands.add_parser("discover", help="登录 OOPZ 并列出域和频道 ID")
+    discover.add_argument("--area-id", help="只查询指定域的频道")
+    discover.add_argument("--areas-only", action="store_true", help="只列出已加入的域")
+    discover.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
@@ -176,7 +193,14 @@ def main() -> None:
     if args.command == "check":
         raise SystemExit(check_config(args.env_file))
     if args.command == "discover":
-        raise SystemExit(discover_channels(args.env_file))
+        raise SystemExit(
+            discover_channels(
+                args.env_file,
+                area_id=args.area_id or "",
+                areas_only=args.areas_only,
+                json_output=args.json,
+            )
+        )
     raise SystemExit(run(args.env_file))
 
 

@@ -2,6 +2,22 @@
 
 ## 创建配置
 
+`install.sh` 和 `install.ps1` 会自动启动交互式配置向导。向导提供选项和默认值，并隐藏 App Secret、密码、Token 与 Cookie 的输入内容。
+
+OOPZ 频道配置支持域 ID 联动查询：向导先列出账号加入的域，也允许手动输入域 ID；随后读取该域的频道，并分别选择文字频道和语音频道。
+
+安装完成后可以再次运行向导：
+
+```bash
+.venv/bin/python scripts/configure.py
+```
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\configure.py
+```
+
+也可以直接从模板创建配置：
+
 ```bash
 python scripts/init_config.py
 ```
@@ -47,17 +63,27 @@ OOPZ_JWT_TOKEN=
 
 只填写登录信息后运行 `oopzbot discover`，即可打印账号加入的域和频道 ID。
 
+查询指定域：
+
+```bash
+oopzbot discover --area-id <域ID>
+```
+
 ## 音乐接口
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `QQ_MUSIC_ENABLED` | `true` | 是否启用 QQ 音乐 |
-| `QQ_MUSIC_BASE_URL` | `http://127.0.0.1:3200` | 兼容音乐 API 根地址 |
+| `QQ_MUSIC_MANAGED` | `true` | 是否由 Bot 自动启动安装脚本提供的固定版本 API |
+| `QQ_MUSIC_BASE_URL` | `http://127.0.0.1:3200` | 音乐 API 根地址 |
+| `QQ_MUSIC_SERVICE_DIR` | `.services/qqmusic-api` | 固定版本 API 的本地安装目录 |
 | `QQ_MUSIC_COOKIE` | 空 | 需要登录态或高音质时填写 |
 | `QQ_MUSIC_QUALITY` | `320` | 主音质：`m4a/128/320/ape/flac` |
 | `QQ_MUSIC_FALLBACK_QUALITY` | `128` | 主地址不可用时的音质 |
 
-`QQ_MUSIC_BASE_URL` 应指向可访问的兼容音乐 API。Docker 中访问宿主机服务时使用 `http://host.docker.internal:3200`。
+本地安装保持前三项默认值即可。Bot 会验证安装标记、固定提交和四个必需端点，然后在回环地址启动服务；QQ/OOPZ 凭据不会传给该子进程。
+
+只有明确使用自行维护的服务时才设置 `QQ_MUSIC_MANAGED=false` 并修改 `QQ_MUSIC_BASE_URL`。外部服务必须兼容 `/getSearchByKey`、`/getMusicPlay`、`/getSongInfo` 和 `/getLyric`。
 
 ## 可选后台任务
 

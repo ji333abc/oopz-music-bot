@@ -1,6 +1,6 @@
 """QQ 音乐平台实现。
 
-配置 ``QQ_MUSIC_CONFIG.base_url`` 指向 QQ Music API 服务地址。
+服务地址来自 ``QQ_MUSIC_BASE_URL``；默认由主进程自动托管固定版本 API。
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ class QQMusic:
         )
         self._session = requests.Session()
         if self.enabled and not self.base_url:
-            logger.warning("QQ 音乐 API 地址未配置 (QQ_MUSIC_CONFIG.base_url)")
+            logger.warning("QQ 音乐 API 地址未配置 (QQ_MUSIC_BASE_URL)")
 
     @staticmethod
     def _normalize_quality(value, default: str = "128") -> str:

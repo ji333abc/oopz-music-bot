@@ -8,8 +8,9 @@
 - [QQ BotPy](https://github.com/tencent-connect/botpy)（MIT）：QQ 官方机器人接入。
 - [QQBot Node.js SDK](https://www.npmjs.com/package/@tencent-connect/qqbot-nodejs)（MIT，可选）：群文件上传。
 - [JMComic](https://github.com/hect0x7/JMComic-Crawler-Python)（MIT，可选）：文件任务的数据获取与图片处理。
+- [Rain120/qq-music-api](https://github.com/Rain120/qq-music-api)（MIT）：默认音乐接口。安装器与 Docker 固定使用提交 `9fb0756b8b88052d5eafe25848d01cf72b53e281`；源码保持在独立目录或独立容器中。
 - FastAPI、Uvicorn、Requests、Playwright 及其余依赖：详见 `pyproject.toml` 和各软件包自身许可证。
 
-兼容音乐接口由部署者通过 `QQ_MUSIC_BASE_URL` 指定。部署者应自行确认所选服务的许可证、接口条款和内容授权。
+QQ 音乐 API 上游 README 另有“仅供学习、不可商用”的使用提示。默认安装不会改变其作者署名、MIT 许可证或上游声明；音乐内容的访问与使用仍由部署者自行确保合规。
 
 项目名称、平台名称和商标归各自权利人所有。本项目不是 OOPZ、腾讯或 QQ 音乐官方产品。

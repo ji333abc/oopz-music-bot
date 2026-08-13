@@ -1,4 +1,21 @@
 services:
+  qqmusic:
+    build:
+      context: .
+      dockerfile: Dockerfile.qqmusic
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('http').get('http://127.0.0.1:3200/explorer/metadata',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 20s
+    init: true
+
   bot:
     build: .
     restart: unless-stopped
@@ -6,8 +23,11 @@ services:
       - .env
     environment:
       OOPZ_VOICE_BROWSER_EXECUTABLE_PATH: /usr/bin/chromium
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      QQ_MUSIC_MANAGED: "false"
+      QQ_MUSIC_BASE_URL: http://qqmusic:3200
+    depends_on:
+      qqmusic:
+        condition: service_healthy
     volumes:
       - ./data:/app/data
     init: true
