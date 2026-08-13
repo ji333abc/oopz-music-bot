@@ -22,12 +22,12 @@ flowchart LR
     QQ --> Bridge["本机命令桥接"]
     Bridge --> Core["音乐控制器与队列"]
     Core --> Music["QQ 音乐 HTTP 适配器"]
-    Music --> API["兼容的音乐 API"]
+    Music --> API["固定版本 QQ Music API"]
     Core --> SDK["OOPZ SDK"]
     SDK --> Voice["OOPZ / Agora 语音频道"]
 ```
 
-机器人、内部 API、队列和 OOPZ SDK 运行在同一个 Python 进程中。内部桥接固定监听回环地址。音乐数据由 `QQ_MUSIC_BASE_URL` 配置的兼容 HTTP API 提供。
+机器人、内部 API、队列和 OOPZ SDK 运行在同一个 Python 进程中。内部桥接固定监听回环地址。本地安装默认使用项目锁定版本的 `Rain120/qq-music-api`，由 Bot 自动托管；Docker Compose 将它作为内部服务运行。
 
 详细设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
@@ -43,47 +43,69 @@ cd oopz-music-bot
 python scripts/init_config.py
 ```
 
-编辑 `.env`，至少填写 QQ Bot、OOPZ 登录信息、目标频道和音乐接口地址，然后执行：
+编辑 `.env`，至少填写 QQ Bot、OOPZ 登录信息和目标频道，然后执行：
 
 ```bash
 docker compose up -d --build
 docker compose logs -f bot
 ```
 
-如果音乐 API 运行在 Docker 主机的 `3200` 端口，将 `.env` 设置为：
-
-```dotenv
-QQ_MUSIC_BASE_URL=http://host.docker.internal:3200
-```
-
-容器不暴露端口；它只主动连接 QQ、OOPZ 和音乐接口。
+Compose 会构建固定提交的 QQ 音乐 API，并只在容器内部网络提供给 Bot。两个容器都不向主机映射端口。
 
 ### 方式二：本地安装
 
-要求 Python 3.11+。默认安装只包含音乐 Bot；只有启用可选文件任务时才需要 Node.js 18+。
+要求 Python 3.11+、Node.js 18+、npm 和 Git。Node.js 与 Git 用于安装项目锁定的 QQ 音乐 API。
 
 Linux / macOS：
 
 ```bash
-python3 scripts/init_config.py
-sh scripts/bootstrap.sh
+sh install.sh
 ```
 
 Windows PowerShell：
 
 ```powershell
-python .\scripts\init_config.py
-.\scripts\bootstrap.ps1
+.\install.ps1
 ```
 
-如需同时安装可选文件任务，运行脚本前设置 `OOPZBOT_INSTALL_JM=1`。
-
-安装后编辑 `.env`，依次执行：
+如需同时安装可选文件任务：
 
 ```bash
-oopzbot discover   # 列出 OOPZ 域、文字频道和语音频道 ID
-oopzbot check      # 离线检查配置
-oopzbot start      # 启动
+sh install.sh --with-jm
+```
+
+```powershell
+.\install.ps1 -WithJm
+```
+
+安装脚本默认下载并固定到已经适配的 QQ 音乐 API 提交，同时通过交互式问题选择其他组件，并逐项填写 QQ Bot、OOPZ 和频道配置。Secret、密码和 Cookie 使用隐藏输入；检测到已有 `.env` 时可以直接保留或逐项修改。
+
+填写 OOPZ 登录信息后，向导会查询账号加入的域。选择域或输入域 ID 后，文字频道和语音频道会分别显示为编号列表，选中后自动写入配置。
+
+脚本支持重复运行，并保留已有 `.env`。也可以使用参数控制安装行为：
+
+| Linux / macOS | Windows PowerShell | 作用 |
+| --- | --- | --- |
+| `--with-jm` | `-WithJm` | 安装 JM 文件任务和 Node.js 上传器 |
+| `--skip-browser` | `-SkipBrowser` | 跳过 Chromium 下载 |
+| `--external-music-api` | `-ExternalMusicApi` | 不安装默认 API，改用已有兼容服务 |
+| `--non-interactive` | `-NonInteractive` | 使用默认选项，适合自动化部署 |
+| `--python PATH` | `-Python PATH` | 指定 Python 3.11+ 可执行文件 |
+
+安装后编辑 `.env`。Linux / macOS 执行：
+
+```bash
+.venv/bin/oopzbot discover   # 列出 OOPZ 域、文字频道和语音频道 ID
+.venv/bin/oopzbot check      # 离线检查配置
+.venv/bin/oopzbot start      # 启动
+```
+
+Windows PowerShell 执行：
+
+```powershell
+.\.venv\Scripts\oopzbot.exe discover
+.\.venv\Scripts\oopzbot.exe check
+.\.venv\Scripts\oopzbot.exe start
 ```
 
 ## 配置
@@ -103,6 +125,7 @@ QQBOT_OOPZ_AREA_ID=
 QQBOT_OOPZ_TEXT_CHANNEL_ID=
 QQBOT_OOPZ_VOICE_CHANNEL_ID=
 
+QQ_MUSIC_MANAGED=true
 QQ_MUSIC_BASE_URL=http://127.0.0.1:3200
 ```
 
@@ -156,4 +179,4 @@ npm test --prefix tools/qqbot-uploader
 
 [MIT](LICENSE)
 
-OOPZ SDK、QQ Bot SDK 及其他第三方组件适用各自许可证；兼容音乐接口由部署者自行选择并审查。
+OOPZ SDK、QQ Bot SDK、默认安装的 QQ Music API 及其他第三方组件适用各自许可证，详见 [THIRD_PARTY.md](THIRD_PARTY.md)。

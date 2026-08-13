@@ -44,7 +44,9 @@ class Settings:
     oopz_person_uid: str
 
     qq_music_enabled: bool
+    qq_music_managed: bool
     qq_music_base_url: str
+    qq_music_service_dir: str
     qq_music_cookie: str
     qq_music_quality: str
     qq_music_fallback_quality: str
@@ -53,6 +55,8 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> Settings:
+        music_base_url = _text("QQ_MUSIC_BASE_URL", "http://127.0.0.1:3200")
+        managed_default = music_base_url.rstrip("/") == "http://127.0.0.1:3200"
         return cls(
             qqbot_app_id=_text("QQBOT_APP_ID"),
             qqbot_app_secret=_text("QQBOT_APP_SECRET"),
@@ -64,7 +68,12 @@ class Settings:
             oopz_voice_channel_id=_text("QQBOT_OOPZ_VOICE_CHANNEL_ID"),
             oopz_person_uid=_text("OOPZ_PERSON_UID"),
             qq_music_enabled=_boolean("QQ_MUSIC_ENABLED", True),
-            qq_music_base_url=_text("QQ_MUSIC_BASE_URL", "http://127.0.0.1:3200"),
+            qq_music_managed=_boolean("QQ_MUSIC_MANAGED", managed_default),
+            qq_music_base_url=music_base_url,
+            qq_music_service_dir=_text(
+                "QQ_MUSIC_SERVICE_DIR",
+                ".services/qqmusic-api",
+            ),
             qq_music_cookie=_text("QQ_MUSIC_COOKIE"),
             qq_music_quality=_text("QQ_MUSIC_QUALITY", "320"),
             qq_music_fallback_quality=_text("QQ_MUSIC_FALLBACK_QUALITY", "128"),
@@ -103,6 +112,13 @@ class Settings:
             errors.append("OOPZBOT_BRIDGE_PORT 必须在 1-65535 之间")
         if self.qq_music_enabled and not self.qq_music_base_url:
             errors.append("启用 QQ 音乐时必须配置 QQ_MUSIC_BASE_URL")
+        if self.qq_music_enabled and self.qq_music_managed:
+            from .qqmusic_service import managed_url_error
+
+            if error := managed_url_error(self.qq_music_base_url):
+                errors.append(error)
+            if not self.qq_music_service_dir:
+                errors.append("托管 QQ 音乐 API 时必须配置 QQ_MUSIC_SERVICE_DIR")
         if self.qq_music_quality not in {"m4a", "128", "320", "ape", "flac"}:
             errors.append("QQ_MUSIC_QUALITY 不是支持的音质")
         return errors

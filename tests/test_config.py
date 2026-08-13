@@ -37,6 +37,27 @@ class SettingsTests(unittest.TestCase):
             errors = Settings.from_env().validate()
         self.assertTrue(any("回环地址" in error for error in errors))
 
+    def test_external_music_url_preserves_legacy_external_mode(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"QQ_MUSIC_BASE_URL": "https://music.example.test"},
+            clear=True,
+        ):
+            settings = Settings.from_env()
+        self.assertFalse(settings.qq_music_managed)
+
+    def test_managed_music_rejects_public_host(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "QQ_MUSIC_MANAGED": "true",
+                "QQ_MUSIC_BASE_URL": "http://0.0.0.0:3200",
+            },
+            clear=True,
+        ):
+            errors = Settings.from_env().validate()
+        self.assertTrue(any("回环地址" in error for error in errors))
+
     def test_bridge_token_is_generated_in_env_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / ".env"

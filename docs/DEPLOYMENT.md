@@ -22,7 +22,7 @@ docker compose up -d --build
 docker compose down
 ```
 
-容器通过出站网络连接 QQ、OOPZ 和音乐接口，不映射主机端口。运行数据挂载到仓库的 `data/`。
+Compose 同时启动 Bot 和固定版本 QQ 音乐 API。音乐接口只在 Compose 内部网络开放，两个服务都不映射主机端口。运行数据挂载到仓库的 `data/`。
 
 ## systemd
 
@@ -34,7 +34,7 @@ sudo install -d -o oopzbot -g oopzbot /opt/oopz-music-bot
 sudo cp -a . /opt/oopz-music-bot/
 sudo chown -R oopzbot:oopzbot /opt/oopz-music-bot
 cd /opt/oopz-music-bot
-sudo -u oopzbot sh scripts/bootstrap.sh
+sudo -u oopzbot sh install.sh
 sudo chown -R root:root /opt/oopz-music-bot
 sudo install -d -o oopzbot -g oopzbot /opt/oopz-music-bot/data
 sudo install -o root -g oopzbot -m 0640 .env /etc/oopzbot.env
@@ -52,12 +52,12 @@ systemctl status oopzbot
 journalctl -u oopzbot -f
 ```
 
-Playwright 浏览器会安装到 `/opt/oopz-music-bot/.playwright`，服务可读取但不能修改。服务使用 `ProtectSystem=full`，只允许写入 `/opt/oopz-music-bot/data`。
+安装脚本会把固定版本音乐 API 放到 `/opt/oopz-music-bot/.services/qqmusic-api`。Playwright 浏览器安装在 `/opt/oopz-music-bot/.playwright`；服务只需读取这两个目录。服务使用 `ProtectSystem=full`，只允许写入 `/opt/oopz-music-bot/data`。
 
 ## 故障排查
 
 - 启动前先运行 `oopzbot check`。
 - 找不到频道 ID 时运行 `oopzbot discover`。
 - 语音初始化失败时确认 Chromium 已安装；容器内路径为 `/usr/bin/chromium`。
-- 搜索正常但无法播放时检查音乐 Cookie、音质和音乐 API 日志。
+- 搜索正常但无法播放时检查音乐 Cookie、音质，以及 `journalctl -u oopzbot` 中的音乐 API 日志。
 - QQ 群无响应时确认机器人已启用群消息事件，并检查群白名单。
