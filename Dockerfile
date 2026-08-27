@@ -2,7 +2,10 @@ FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    OOPZ_VOICE_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
+    OOPZ_VOICE_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium \
+    QQBOT_JM_UPLOADER=/app/tools/qqbot-uploader/uploader.mjs \
+    QQBOT_JM_TEMP_ROOT=/app/data/jm-tasks \
+    QQBOT_JM_TIMING_PATH=/app/data/jm_timing.json
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends chromium nodejs npm ca-certificates \

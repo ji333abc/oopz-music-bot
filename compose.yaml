@@ -28,6 +28,9 @@ services:
       OOPZBOT_BRIDGE_HOST: 0.0.0.0
       OOPZBOT_BRIDGE_PRIVATE_NETWORK: "true"
       OOPZBOT_PANEL_STATE_FILE: /app/data/panel-state.json
+      QQBOT_JM_UPLOADER: /app/tools/qqbot-uploader/uploader.mjs
+      QQBOT_JM_TEMP_ROOT: /app/data/jm-tasks
+      QQBOT_JM_TIMING_PATH: /app/data/jm_timing.json
     depends_on:
       qqmusic:
         condition: service_healthy

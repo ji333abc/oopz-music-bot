@@ -273,7 +273,7 @@ QQ_MUSIC_BASE_URL=http://127.0.0.1:3200
 QQ_MUSIC_SERVICE_DIR=/home/oopzbot/qqmusic-api
 ```
 
-容器会使用镜像内的 Python、JM Worker、Node.js、上传器和内部 QQMusic 地址。保留旧绝对路径会导致容器找不到文件。
+容器会使用镜像内的 Python、JM Worker、Node.js、上传器和内部 QQMusic 地址；Compose 已固定上传器为 `/app/tools/qqbot-uploader/uploader.mjs`，任务数据写入 `/app/data`。保留旧宿主机绝对路径会导致容器找不到文件。
 
 建议的新 `.env` 关键部分如下，真实值自行填写：
 
