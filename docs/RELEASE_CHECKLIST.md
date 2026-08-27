@@ -79,7 +79,7 @@ docker compose up -d
 
 ## 本次 P0 基线执行记录（2026-08-28）
 
-- [x] Python 单元测试：103 项通过。
+- [x] Python 单元测试：104 项通过。
 - [x] Python `compileall`：通过。
 - [x] 备份/恢复隔离测试：4 项通过。
 - [x] Docker 静态配置测试：5 项通过。
