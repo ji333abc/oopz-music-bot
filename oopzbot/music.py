@@ -102,13 +102,6 @@ class QQMusic:
         songs = self._extract_songs(data or {})
 
         if not songs:
-            data = self._get(
-                "/search",
-                params={"key": keyword, "limit": limit, "page": 1},
-            )
-            songs = self._extract_songs(data or {})
-
-        if not songs:
             return None
         return self._parse_song(songs[0])
 
@@ -124,13 +117,6 @@ class QQMusic:
             params={"key": keyword, "limit": limit, "page": page},
         )
         songs = self._extract_songs(data or {})
-
-        if not songs:
-            data = self._get(
-                "/search",
-                params={"key": keyword, "limit": limit, "page": page},
-            )
-            songs = self._extract_songs(data or {})
 
         return [
             parsed

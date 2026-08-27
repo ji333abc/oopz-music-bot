@@ -5,16 +5,16 @@ RUN apk add --no-cache git
 WORKDIR /opt/qqmusic-api
 RUN git init . \
     && git remote add origin https://github.com/Rain120/qq-music-api.git \
-    && git fetch --depth 1 origin 9fb0756b8b88052d5eafe25848d01cf72b53e281 \
+    && git fetch --depth 1 origin d05420bf098bd2769866eba81cfd48a6d0c6f50c \
     && git checkout --detach FETCH_HEAD \
-    && test "$(git rev-parse HEAD)" = "9fb0756b8b88052d5eafe25848d01cf72b53e281" \
+    && test "$(git rev-parse HEAD)" = "d05420bf098bd2769866eba81cfd48a6d0c6f50c" \
     && npm ci --include=dev --no-audit --no-fund \
     && rm -rf .git
 
 FROM node:22-alpine
 
 LABEL org.opencontainers.image.source="https://github.com/Rain120/qq-music-api" \
-      org.opencontainers.image.revision="9fb0756b8b88052d5eafe25848d01cf72b53e281" \
+      org.opencontainers.image.revision="d05420bf098bd2769866eba81cfd48a6d0c6f50c" \
       org.opencontainers.image.licenses="MIT"
 
 WORKDIR /opt/qqmusic-api

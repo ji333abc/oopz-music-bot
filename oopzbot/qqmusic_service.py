@@ -18,7 +18,7 @@ from .config import Settings
 logger = logging.getLogger("QQMusicService")
 
 QQMUSIC_REPOSITORY = "https://github.com/Rain120/qq-music-api.git"
-QQMUSIC_COMMIT = "9fb0756b8b88052d5eafe25848d01cf72b53e281"
+QQMUSIC_COMMIT = "d05420bf098bd2769866eba81cfd48a6d0c6f50c"
 QQMUSIC_BRANCH = "next"
 QQMUSIC_LICENSE = "MIT"
 QQMUSIC_MARKER = ".oopzbot-managed.json"
