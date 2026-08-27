@@ -4,6 +4,8 @@ services:
       context: .
       dockerfile: Dockerfile.qqmusic
     restart: unless-stopped
+    environment:
+      QQ_MUSIC_COOKIE: ${QQ_MUSIC_COOKIE:-}
     healthcheck:
       test:
         - CMD

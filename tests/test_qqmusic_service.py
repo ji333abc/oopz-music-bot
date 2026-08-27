@@ -80,6 +80,32 @@ class QQMusicServiceTests(unittest.TestCase):
         self.assertNotIn("QQBOT_APP_SECRET", child_env)
         self.assertEqual(child_env["PORT"], "3200")
 
+    def test_child_process_receives_only_configured_music_cookie(self) -> None:
+        settings = SimpleNamespace(
+            qq_music_enabled=True,
+            qq_music_managed=True,
+            qq_music_base_url="http://127.0.0.1:3200",
+            qq_music_service_dir=".services/qqmusic-api",
+            qq_music_cookie="uin=12345; skey=test-value",
+        )
+        process = Mock()
+        process.poll.return_value = None
+        with (
+            patch.dict(os.environ, {"PATH": "test-path"}, clear=True),
+            patch(
+                "oopzbot.qqmusic_service.managed_installation_errors",
+                return_value=[],
+            ),
+            patch("oopzbot.qqmusic_service.shutil.which", return_value="node"),
+            patch("oopzbot.qqmusic_service.subprocess.Popen", return_value=process) as popen,
+        ):
+            service = ManagedQQMusicService(settings, timeout=0.1)
+            service._compatible_service_is_ready = Mock(side_effect=[False, True])
+            service.start()
+
+        child_env = popen.call_args.kwargs["env"]
+        self.assertEqual(child_env["QQ_MUSIC_COOKIE"], settings.qq_music_cookie)
+
     def test_existing_compatible_service_is_not_owned(self) -> None:
         settings = SimpleNamespace(
             qq_music_enabled=True,

@@ -19,6 +19,8 @@ class DockerConfigurationTests(unittest.TestCase):
         dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
         compose = (root / "compose.yaml").read_text(encoding="utf-8")
 
+        self.assertIn("QQ_MUSIC_COOKIE: ${QQ_MUSIC_COOKIE:-}", compose)
+
         expected = {
             "QQBOT_JM_UPLOADER": "/app/tools/qqbot-uploader/uploader.mjs",
             "QQBOT_JM_TEMP_ROOT": "/app/data/jm-tasks",

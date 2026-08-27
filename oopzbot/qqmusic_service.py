@@ -102,6 +102,7 @@ class ManagedQQMusicService:
         self.enabled = settings.qq_music_enabled and settings.qq_music_managed
         self.base_url = settings.qq_music_base_url.rstrip("/")
         self.directory = service_directory(settings.qq_music_service_dir)
+        self.cookie = str(getattr(settings, "qq_music_cookie", "") or "").strip()
         self.timeout = timeout
         self.process: subprocess.Popen | None = None
 
@@ -142,6 +143,9 @@ class ManagedQQMusicService:
             PORT=str(port),
             QQ_MUSIC_HOST=host,
         )
+        cookie = str(getattr(self, "cookie", "") or "").strip()
+        if cookie:
+            child_env["QQ_MUSIC_COOKIE"] = cookie
         self.process = subprocess.Popen(
             [node, str(launcher), str(self.directory)],
             cwd=self.directory,
