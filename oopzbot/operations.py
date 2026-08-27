@@ -11,6 +11,12 @@ from threading import RLock
 from uuid import uuid4
 
 
+COMPONENT_STATUSES = frozenset(
+    {"starting", "ok", "degraded", "error", "offline", "unknown"}
+)
+_STATUS_ALIASES = {"online": "ok", "disabled": "offline"}
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -56,10 +62,17 @@ class OperationsRegistry:
         os.replace(temporary, self._path)
 
     def set_component(self, name: str, status: str, message: str) -> None:
+        normalized_status = _STATUS_ALIASES.get(str(status).strip().lower(), str(status).strip().lower())
+        if normalized_status not in COMPONENT_STATUSES:
+            raise ValueError(
+                f"组件状态必须是 {', '.join(sorted(COMPONENT_STATUSES))}"
+            )
+        reason = " ".join(str(message or "未知原因").split())[:240]
         with self._lock:
             self._data["components"][name] = {
-                "status": status,
-                "message": message,
+                "status": normalized_status,
+                "message": reason,
+                "reason": reason,
                 "updated_at": _now(),
             }
             self._save()

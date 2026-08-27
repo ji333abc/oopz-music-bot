@@ -494,7 +494,7 @@ def _forward_command(
 class OopzQQClient(botpy.Client):
     async def on_ready(self):
         logger.info("QQ 机器人已上线: %s", self.robot.name)
-        operations.set_component("qq_bot", "online", "QQ 网关已连接")
+        operations.set_component("qq_bot", "ok", "QQ 网关已连接")
         operations.record_event("gateway", "QQ 机器人已上线", source="QQ Bot")
         if not ALLOWED_GROUPS:
             logger.warning(

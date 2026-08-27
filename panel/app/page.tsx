@@ -30,8 +30,9 @@ type VoiceChannel = {
   members: Member[];
 };
 type ComponentHealth = {
-  status: "online" | "starting" | "offline" | "error" | "disabled";
+  status: "starting" | "ok" | "degraded" | "error" | "offline" | "unknown";
   message: string;
+  reason?: string;
   updated_at?: string;
 };
 type PanelEvent = {
@@ -90,10 +91,13 @@ const navigationItems: Array<{ id: PanelSection; icon: string; label: string }> 
 ];
 
 const componentNames: Record<string, string> = {
-  bridge: "控制桥接",
-  oopz: "OOPZ",
+  internal_api: "控制桥接",
+  legacy_core: "旧版核心",
+  oopz_websocket: "OOPZ WebSocket",
+  oopz_voice: "OOPZ 语音",
+  redis: "Redis",
+  qqmusic: "QQ 音乐",
   qq_bot: "QQ 机器人",
-  qq_music: "QQ 音乐",
   uploader: "QQ 上传器",
 };
 const phaseNames: Record<string, string> = {
@@ -322,8 +326,8 @@ export default function Home() {
   const onlineCount = configuredChannel?.member_count || 0;
   const activeJm = jmJobs.filter((job) => job.status === "running").length;
   const healthEntries = Object.entries(health);
-  const unhealthy = healthEntries.filter(([, item]) => !["online", "disabled"].includes(item.status)).length;
-  const systemHealthy = connected && unhealthy === 0;
+  const unhealthy = healthEntries.filter(([, item]) => item.status !== "ok").length;
+  const systemHealthy = connected && healthEntries.length > 0 && unhealthy === 0;
 
   return (
     <div className="app-shell">
@@ -352,7 +356,7 @@ export default function Home() {
         </section>
 
         <section className="health-grid" aria-label="组件健康状态">
-          {healthEntries.length ? healthEntries.map(([key, item]) => <article className="health-item" key={key}><i className={`health-dot ${item.status}`} /><div><strong>{componentNames[key] || key}</strong><span>{item.message}</span></div><em>{item.status}</em></article>) : <div className="unavailable-strip">组件健康数据不可用</div>}
+          {healthEntries.length ? healthEntries.map(([key, item]) => <article className="health-item" key={key}><i className={`health-dot ${item.status}`} /><div><strong>{componentNames[key] || key}</strong><span>{item.reason || item.message}</span></div><em>{item.status}</em></article>) : <div className="unavailable-strip">组件健康数据不可用</div>}
         </section>
 
         <section className="dashboard-grid">

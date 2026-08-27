@@ -1341,21 +1341,97 @@ def _command_event(command: str, result: dict, source: str) -> None:
         )
 
 
+def _health_entry(status: str, reason: str) -> dict[str, str]:
+    """Create the bounded public shape used by both readiness and Panel."""
+    safe_reason = " ".join(str(reason or "未知原因").split())[:240]
+    return {
+        "status": status,
+        "reason": safe_reason,
+        "message": safe_reason,
+        "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+
+
+def _runtime_status(runtime) -> tuple[str, str]:
+    if runtime is None:
+        return "starting", "OOPZ 运行时尚未初始化"
+    if getattr(runtime, "_closed", None) is not None and runtime._closed.is_set():
+        return "offline", "OOPZ 运行时已停止"
+    startup_error = getattr(runtime, "_startup_error", None)
+    if startup_error is not None:
+        return "error", f"OOPZ 初始化失败：{type(startup_error).__name__}"
+    if bool(getattr(runtime, "ready", False)):
+        return "ok", "OOPZ 运行时已就绪"
+    return "starting", "等待 OOPZ 运行时就绪"
+
+
+def _websocket_status(runtime) -> tuple[str, str]:
+    if runtime is None:
+        return "starting", "OOPZ WebSocket 尚未初始化"
+    context = getattr(runtime, "context", None)
+    if context is not None:
+        thread = getattr(getattr(context, "client", None), "_thread", None)
+        if thread is not None and thread.is_alive():
+            return "ok", "OOPZ WebSocket 已连接"
+        if getattr(runtime, "_closed", None) is not None and runtime._closed.is_set():
+            return "offline", "OOPZ WebSocket 已断开"
+        return "degraded", "OOPZ WebSocket 未连接"
+    status, reason = _runtime_status(runtime)
+    return status, "OOPZ WebSocket " + reason.removeprefix("OOPZ ")
+
+
+def _voice_status(music, runtime) -> tuple[str, str]:
+    if runtime is None:
+        return "starting", "OOPZ 语音运行时尚未初始化"
+    if not bool(getattr(runtime, "ready", False)):
+        return "unknown", "尚未建立 OOPZ 语音会话"
+    if getattr(music, "_voice_channel_id", None):
+        return "ok", "OOPZ 语音频道已加入"
+    if bool(getattr(runtime, "_voice_started", False)):
+        return "ok", "OOPZ 语音客户端已启动"
+    return "unknown", "尚未加入语音频道"
+
+
+def _redis_status(music) -> tuple[str, str]:
+    queue = getattr(music, "queue", None)
+    client = getattr(queue, "_redis", None)
+    if client is None:
+        try:
+            from core import queue_manager
+
+            client = getattr(queue_manager, "_redis_client", None)
+        except (ImportError, AttributeError):
+            client = None
+    if client is None:
+        return "unknown", "Redis 状态尚未探测"
+    if client.__class__.__name__ == "_InMemoryRedis":
+        return "degraded", "Redis 不可用，当前使用内存队列"
+    return "ok", "Redis 已连接"
+
+
 def _service_health(music) -> dict[str, dict]:
+    """Return one bounded component snapshot for /readyz and the Panel."""
     settings = get_settings()
     stored = operations.snapshot().get("components", {})
-    runtime = getattr(music, "runtime", None)
-    oopz_ready = bool(getattr(runtime, "ready", False))
+    runtime = getattr(music, "runtime", None) if music is not None else None
+    legacy_status, legacy_reason = _runtime_status(runtime)
+    websocket_status, websocket_reason = _websocket_status(runtime)
+    voice_status, voice_reason = _voice_status(music, runtime)
+    stored_bot = stored.get("qq_bot") or {}
+    bot_status = str(stored_bot.get("status") or "starting")
+    if bot_status in {"online", "disabled"}:
+        bot_status = {"online": "ok", "disabled": "offline"}[bot_status]
+    if bot_status not in {"starting", "ok", "degraded", "error", "offline", "unknown"}:
+        bot_status = "unknown"
+
     components: dict[str, dict] = {
-        "bridge": {"status": "online", "message": "内部控制接口正常"},
-        "oopz": {
-            "status": "online" if oopz_ready else "error",
-            "message": "OOPZ SDK 已连接" if oopz_ready else "OOPZ SDK 未就绪",
-        },
-        "qq_bot": stored.get(
-            "qq_bot",
-            {"status": "starting", "message": "等待 QQ 网关上线"},
-        ),
+        "internal_api": _health_entry("ok", "内部控制接口正常"),
+        "legacy_core": _health_entry(legacy_status, legacy_reason),
+        "oopz_websocket": _health_entry(websocket_status, websocket_reason),
+        "oopz_voice": _health_entry(voice_status, voice_reason),
+        "redis": _health_entry(*_redis_status(music)) if music is not None else _health_entry("unknown", "Redis 状态尚未探测"),
+        "qqmusic": _health_entry("offline", "QQ 音乐功能未启用"),
+        "qq_bot": _health_entry(bot_status, str(stored_bot.get("reason") or stored_bot.get("message") or "等待 QQ 网关上线")),
     }
 
     if settings.qq_music_enabled:
@@ -1365,21 +1441,16 @@ def _service_health(music) -> dict[str, dict]:
                 timeout=3,
             )
             response.raise_for_status()
-            components["qq_music"] = {
-                "status": "online",
-                "message": "QQ 音乐接口可访问",
-            }
+            components["qqmusic"] = _health_entry("ok", "QQ 音乐接口可访问")
         except Exception as exc:
-            components["qq_music"] = {
-                "status": "error",
-                "message": f"QQ 音乐接口异常：{type(exc).__name__}",
-            }
-    else:
-        components["qq_music"] = {"status": "disabled", "message": "未启用"}
+            components["qqmusic"] = _health_entry(
+                "error",
+                f"QQ 音乐接口异常：{type(exc).__name__}",
+            )
 
     jm_enabled = _env("QQBOT_JM_ENABLED").lower() in {"1", "true", "yes", "on"}
     if not jm_enabled:
-        components["uploader"] = {"status": "disabled", "message": "JM 未启用"}
+        components["uploader"] = _health_entry("offline", "JM 未启用")
     else:
         project_root = Path(__file__).resolve().parents[1]
         uploader = Path(
@@ -1389,11 +1460,25 @@ def _service_health(music) -> dict[str, dict]:
         node = _env("QQBOT_JM_NODE") or "node"
         sdk = uploader.parent / "node_modules" / "@tencent-connect" / "qqbot-nodejs"
         ready = uploader.is_file() and (Path(node).is_file() or shutil.which(node)) and sdk.is_dir()
-        components["uploader"] = {
-            "status": "online" if ready else "error",
-            "message": "QQ 分片上传器就绪" if ready else "上传器或依赖缺失",
-        }
+        components["uploader"] = _health_entry(
+            "ok" if ready else "error",
+            "QQ 分片上传器就绪" if ready else "上传器或依赖缺失",
+        )
     return components
+
+
+def _readiness_snapshot() -> dict:
+    components = _service_health(_music_handler())
+    required = (
+        "internal_api",
+        "legacy_core",
+        "redis",
+        "qqmusic",
+        "oopz_websocket",
+        "qq_bot",
+    )
+    ok = all(components[name]["status"] == "ok" for name in required)
+    return {"ok": ok, "components": components}
 
 
 def _panel_snapshot() -> dict:
@@ -1487,4 +1572,12 @@ async def panel_snapshot(request: Request):
 
 @router.get("/healthz")
 async def healthz():
-    return {"ok": True, "music_ready": _music_dependency is not None}
+    # Liveness must never call QQ, OOPZ, Redis, or any other external service.
+    return {"ok": True, "status": "ok", "music_ready": _music_dependency is not None}
+
+
+@router.get("/readyz")
+async def readyz():
+    """Report whether the bot can process complete business commands."""
+    result = await asyncio.to_thread(_readiness_snapshot)
+    return JSONResponse(result, status_code=200 if result["ok"] else 503)
