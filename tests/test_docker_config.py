@@ -56,6 +56,17 @@ class DockerConfigurationTests(unittest.TestCase):
         self.assertIn('exec gosu oopzbot "$@"', entrypoint)
         self.assertIn("- gosu\n        - oopzbot\n        - python", compose)
 
+    def test_internal_services_are_not_published_to_the_host(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        compose = (root / "compose.yaml").read_text(encoding="utf-8")
+
+        self.assertNotIn(":6379:6379", compose)
+        self.assertNotIn(":3200:3200", compose)
+        self.assertNotIn(":18080:18080", compose)
+        self.assertIn('"${OOPZ_LEGACY_WEB_BIND:-127.0.0.1}:${OOPZ_LEGACY_WEB_PORT:-18081}:18081"', compose)
+        self.assertIn('"${OOPZ_PANEL_BIND:-127.0.0.1}:${OOPZ_PANEL_PORT:-3000}:3000"', compose)
+        self.assertIn("/healthz", compose)
+
 
 if __name__ == "__main__":
     unittest.main()
