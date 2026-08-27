@@ -2,7 +2,7 @@
 
 > 只需要 QQ 群 JM 下载功能？已抽成独立、可直接 Docker 部署的 [JM QQ Bot](jm-qqbot/README.md)。
 
-一个可自托管的 QQ 群音乐机器人：群成员通过 `@机器人` 点歌，机器人搜索歌曲、维护队列，并把音频推送到指定的 OOPZ 语音频道。
+一个可自托管的 QQ 群音乐机器人：群成员通过 `@机器人` 点歌，机器人搜索歌曲、维护队列，并把音频推送到指定的 OOPZ 语音频道。Docker 模式内置迁移前的完整 OOPZ 核心，不再依赖宿主机上的旧 Python 进程。
 
 机器人通过 QQ 群命令交互，支持 Docker Compose、systemd 和本地 Python 环境部署。
 
@@ -15,6 +15,8 @@
 - 群组白名单和内部桥接鉴权
 - 可选后台归档任务和 QQ 群文件上传
 - Web 管理面板：实时状态、完整队列、搜歌和逐条删除
+- 旧版 OOPZ 消息命令、签名发送、WebSocket 自动重连和 Agora 播放链路
+- Redis 按域持久化队列，Redis 短暂不可用时自动降级并重试连接
 - 单一 CLI、配置检查、频道发现、Docker 和 systemd 部署
 
 ## 架构
@@ -24,14 +26,15 @@ flowchart LR
     User["QQ 群用户"] --> QQ["QQ Bot 入口"]
     QQ --> Bridge["本机命令桥接"]
     Panel["Web 管理面板"] --> Bridge
-    Bridge --> Core["音乐控制器与队列"]
+    Bridge --> Core["旧版 MusicHandler 与 Redis 队列"]
     Core --> Music["QQ 音乐 HTTP 适配器"]
     Music --> API["固定版本 QQ Music API"]
-    Core --> SDK["OOPZ SDK"]
-    SDK --> Voice["OOPZ / Agora 语音频道"]
+    OOPZChat["OOPZ 频道消息"] --> Core
+    Core --> OOPZCore["旧版 Sender / WS / Agora"]
+    OOPZCore --> Voice["OOPZ 文字与语音频道"]
 ```
 
-机器人、内部 API、队列和 OOPZ SDK 运行在同一个 Python 进程中。本地安装时内部桥接固定监听回环地址；Compose 模式只向私有容器网络开放并保留令牌鉴权。Docker Compose 使用与旧版原生部署一致的 `@sansenjian/qq-music-api@2.4.0`，音乐接口和 Web 面板作为独立服务运行。
+机器人、内部 API 和旧版 OOPZ 核心运行在同一个 Python 进程中；Redis、QQMusic API 与新面板是独立容器。本地安装时内部桥接固定监听回环地址；Compose 模式只向私有容器网络开放并保留令牌鉴权。Docker Compose 使用与旧版原生部署一致的 `@sansenjian/qq-music-api@2.4.0`。
 
 详细设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
@@ -54,7 +57,7 @@ docker compose up -d --build
 docker compose logs -f bot
 ```
 
-Compose 会启动 `bot`、固定版本的 `qqmusic` 和 `panel`。音乐接口和机器人桥接只在容器内部网络开放；面板默认监听宿主机 `127.0.0.1:3000`，自带 HTTP Basic Auth（启动前必须设置 `OOPZ_PANEL_PASSWORD`），适合由 Nginx/Caddy 加 HTTPS 后对外提供。
+Compose 会启动 `bot`、`redis`、固定版本的 `qqmusic` 和 `panel`。音乐接口和机器人桥接只在容器内部网络开放；新面板默认监听宿主机 `127.0.0.1:3000`，旧版 OOPZ Web 播放页默认监听 `127.0.0.1:18081`。新面板自带 HTTP Basic Auth（启动前必须设置 `OOPZ_PANEL_PASSWORD`），适合由 Nginx/Caddy 加 HTTPS 后对外提供。
 
 ### 方式二：本地安装
 
@@ -124,6 +127,7 @@ QQBOT_APP_SECRET=
 
 OOPZ_LOGIN_PHONE=
 OOPZ_LOGIN_PASSWORD=
+OOPZ_AGORA_APP_ID=
 
 QQBOT_OOPZ_AREA_ID=
 QQBOT_OOPZ_TEXT_CHANNEL_ID=
@@ -132,6 +136,8 @@ QQBOT_OOPZ_VOICE_CHANNEL_ID=
 QQ_MUSIC_MANAGED=true
 QQ_MUSIC_BASE_URL=http://127.0.0.1:3200
 ```
+
+`OOPZ_AGORA_APP_ID` 是旧版语音核心必需项，应从旧 `config.py` 的 `OOPZ_CONFIG["agora_app_id"]` 迁移；它不是 QQ AppID。
 
 完整说明见 [docs/CONFIGURATION.md](docs/CONFIGURATION.md)。Git 忽略规则覆盖 `.env`、Cookie、Token、日志和运行数据。
 

@@ -88,6 +88,7 @@ class ConfigureWizardTests(unittest.TestCase):
                     "area-id",
                     "text-id",
                     "voice-id",
+                    "agora-id",
                     "",
                     "",
                 ]
@@ -106,6 +107,7 @@ class ConfigureWizardTests(unittest.TestCase):
             self.assertEqual(values["QQBOT_APP_SECRET"], "app-secret")
             self.assertEqual(values["OOPZ_LOGIN_PHONE"], "13800000000")
             self.assertEqual(values["QQBOT_OOPZ_VOICE_CHANNEL_ID"], "voice-id")
+            self.assertEqual(values["OOPZ_AGORA_APP_ID"], "agora-id")
             self.assertEqual(values["QQ_MUSIC_BASE_URL"], "http://127.0.0.1:3200")
             self.assertEqual(values["QQ_MUSIC_MANAGED"], "true")
             self.assertEqual(values["QQBOT_JM_ENABLED"], "false")

@@ -32,6 +32,22 @@ class SettingsTests(unittest.TestCase):
         with patch.dict(os.environ, environment, clear=True):
             self.assertEqual(Settings.from_env().validate(), [])
 
+    def test_legacy_core_requires_agora_app_id(self) -> None:
+        environment = {
+            "QQBOT_APP_ID": "app",
+            "QQBOT_APP_SECRET": "secret",
+            "QQBOT_BRIDGE_TOKEN": "bridge",
+            "QQBOT_OOPZ_AREA_ID": "area",
+            "QQBOT_OOPZ_TEXT_CHANNEL_ID": "text",
+            "QQBOT_OOPZ_VOICE_CHANNEL_ID": "voice",
+            "OOPZ_LOGIN_PHONE": "13800000000",
+            "OOPZ_LOGIN_PASSWORD": "password",
+            "OOPZBOT_USE_LEGACY_CORE": "true",
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            errors = Settings.from_env().validate()
+        self.assertIn("启用旧版 OOPZ 核心时必须配置 OOPZ_AGORA_APP_ID", errors)
+
     def test_public_bridge_host_is_rejected(self) -> None:
         with patch.dict(os.environ, {"OOPZBOT_BRIDGE_HOST": "0.0.0.0"}, clear=True):
             errors = Settings.from_env().validate()

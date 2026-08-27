@@ -29,6 +29,18 @@ class DockerConfigurationTests(unittest.TestCase):
             self.assertIn(f"{name}={value}", dockerfile.replace(" ", ""))
             self.assertIn(f"{name}: {value}", compose)
 
+    def test_legacy_oopz_core_uses_persistent_redis_and_data_volume(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
+        compose = (root / "compose.yaml").read_text(encoding="utf-8")
+
+        self.assertIn("COPY legacy_oopzbot ./legacy_oopzbot", dockerfile)
+        self.assertIn("OOPZBOT_USE_LEGACY_CORE: \"true\"", compose)
+        self.assertIn("BOT_REDIS_HOST: redis", compose)
+        self.assertIn("redis:7.4-alpine", compose)
+        self.assertIn("redis-data:/data", compose)
+        self.assertIn("OOPZ_LEGACY_DATA_DIR: /app/data/legacy", compose)
+
 
 if __name__ == "__main__":
     unittest.main()

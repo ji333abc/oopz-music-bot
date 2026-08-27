@@ -1,4 +1,17 @@
 services:
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+    init: true
+
   qqmusic:
     build:
       context: .
@@ -34,11 +47,22 @@ services:
       QQBOT_JM_UPLOADER: /app/tools/qqbot-uploader/uploader.mjs
       QQBOT_JM_TEMP_ROOT: /app/data/jm-tasks
       QQBOT_JM_TIMING_PATH: /app/data/jm_timing.json
+      OOPZBOT_USE_LEGACY_CORE: "true"
+      OOPZ_LEGACY_DATA_DIR: /app/data/legacy
+      BOT_REDIS_HOST: redis
+      BOT_REDIS_PORT: "6379"
+      BOT_REDIS_PASSWORD: ""
+      BOT_CHROMIUM_EXECUTABLE_PATH: /usr/bin/chromium
+      BOT_CHROMEDRIVER_PATH: /usr/bin/chromedriver
     depends_on:
       qqmusic:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     volumes:
       - ./data:/app/data
+    ports:
+      - "${OOPZ_LEGACY_WEB_BIND:-127.0.0.1}:${OOPZ_LEGACY_WEB_PORT:-18081}:18081"
     healthcheck:
       test:
         - CMD
@@ -48,7 +72,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 5
-      start_period: 60s
+      start_period: 180s
     init: true
     stop_grace_period: 30s
 
@@ -82,3 +106,6 @@ services:
       start_period: 20s
     init: true
     stop_grace_period: 15s
+
+volumes:
+  redis-data:

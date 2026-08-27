@@ -1,0 +1,89 @@
+import threading
+
+from core.logger_config import setup_logger
+from web import web_player_config as web_cfg
+from web.web_player import run_server as run_web_player
+
+from app.lifecycle.context import AppContext
+
+logger = setup_logger("BackgroundServices")
+
+
+class BackgroundServiceRunner:
+    """负责启动命令链路依赖的后台线程与监听器。"""
+
+    def start(self, context: AppContext) -> None:
+        self._start_onebot_v11(context)
+        self._start_music_services(context)
+        self._start_web_player(context)
+        self._start_scheduler_services(context)
+
+    def _start_onebot_v11(self, context: AppContext) -> None:
+        if not context.onebot_v11:
+            return
+        context.onebot_v11.start()
+        logger.info("OneBot v11 旁路服务已启动。")
+
+    def _start_music_services(self, context: AppContext) -> None:
+        music = context.handler.infrastructure.music
+        threading.Thread(
+            target=music.auto_play_monitor,
+            daemon=True,
+        ).start()
+        music.start_web_command_listener()
+        logger.info("自动播放监控已启动。")
+
+    def _start_web_player(self, context: AppContext) -> None:
+        from web.web_player import register_runtime_dependencies, set_oopz_client, set_sender
+        set_sender(context.sender)
+        set_oopz_client(context.client)
+        register_runtime_dependencies(
+            music=context.handler.infrastructure.music,
+            plugins=context.handler.infrastructure.plugins,
+            plugin_host=context.handler.plugin_host,
+        )
+        self._warmup_members_cache(context.sender)
+        web_host = web_cfg.web_host()
+        web_port = web_cfg.web_port()
+        threading.Thread(
+            target=run_web_player,
+            kwargs={"host": web_host, "port": web_port},
+            daemon=True,
+        ).start()
+        logger.info("Web 播放器已启动: http://%s:%s", web_host, web_port)
+        logger.info("WebSocket 客户端启动中...")
+
+    def _warmup_members_cache(self, sender) -> None:
+        try:
+            from core.area_config import get_area_registry
+            registry = get_area_registry()
+            area_ids = registry.get_all_area_ids()
+            if not area_ids:
+                from config import OOPZ_CONFIG
+                fallback = (OOPZ_CONFIG.get("default_area") or "").strip()
+                if not fallback:
+                    areas = sender.get_joined_areas(quiet=True)
+                    if areas:
+                        fallback = (areas[0].get("id") or "").strip()
+                area_ids = [fallback] if fallback else []
+            total = 0
+            for area in area_ids:
+                if not area:
+                    continue
+                result = sender.get_area_members(area=area, quiet=True)
+                if "error" not in result:
+                    total += result.get("fetchedCount", 0)
+                else:
+                    logger.debug("成员缓存预热失败 (area=%s): %s", area[:8], result.get("error"))
+            if total:
+                logger.info("成员缓存预热完成: %d 个域, 共 %d 人", len(area_ids), total)
+        except Exception:
+            logger.debug("成员缓存预热异常", exc_info=True)
+
+    def _start_scheduler_services(self, context: AppContext) -> None:
+        try:
+            scheduler = context.handler.services.scheduler
+            scheduler.scheduled.start()
+            scheduler.reminder.start()
+        except Exception:
+            logger.warning("定时消息/提醒服务启动失败", exc_info=True)

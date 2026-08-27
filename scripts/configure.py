@@ -365,6 +365,14 @@ def configure(
         ask_text("播放通知文字频道 ID", values, "QQBOT_OOPZ_TEXT_CHANNEL_ID")
         ask_text("音频推送语音频道 ID", values, "QQBOT_OOPZ_VOICE_CHANNEL_ID")
 
+    print("\n=== 旧版 OOPZ 语音核心 ===")
+    ask_text(
+        "OOPZ Agora App ID（旧 config.py 中的 agora_app_id）",
+        values,
+        "OOPZ_AGORA_APP_ID",
+        required=True,
+    )
+
     print("\n=== 音乐接口 ===")
     if music_mode is None:
         managed_default = 1 if values.get("QQ_MUSIC_MANAGED", "true") == "true" else 2
@@ -415,6 +423,7 @@ def configure(
             "QQBOT_OOPZ_AREA_ID",
             "QQBOT_OOPZ_TEXT_CHANNEL_ID",
             "QQBOT_OOPZ_VOICE_CHANNEL_ID",
+            "OOPZ_AGORA_APP_ID",
         )
         if not values.get(key)
     ]

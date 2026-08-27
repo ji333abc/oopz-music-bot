@@ -116,6 +116,12 @@ class Settings:
                 "OOPZ 登录未配置：填写 DEVICE_ID/PERSON_UID/JWT_TOKEN，"
                 "或 LOGIN_PHONE/LOGIN_PASSWORD"
             )
+        if _boolean("OOPZBOT_USE_LEGACY_CORE", False) and not _text(
+            "OOPZ_AGORA_APP_ID"
+        ):
+            errors.append(
+                "启用旧版 OOPZ 核心时必须配置 OOPZ_AGORA_APP_ID"
+            )
         loopback_hosts = {"127.0.0.1", "localhost", "::1"}
         docker_bind_hosts = {"0.0.0.0", "::"}
         if self.bridge_host not in loopback_hosts:

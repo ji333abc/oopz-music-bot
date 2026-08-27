@@ -118,13 +118,27 @@ def run(env_file: str | None = None) -> int:
 
     music_service = ManagedQQMusicService(settings)
     music_service.start()
-    runtime = OopzRuntime()
-    try:
-        runtime.start()
-    except Exception:
-        music_service.close()
-        raise
-    controller = MusicController(settings, runtime)
+    legacy_core_enabled = str(
+        os.getenv("OOPZBOT_USE_LEGACY_CORE") or ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if legacy_core_enabled:
+        from .legacy_runtime import LegacyOopzCore
+
+        runtime = LegacyOopzCore()
+        try:
+            controller = runtime.start()
+        except Exception:
+            runtime.close()
+            music_service.close()
+            raise
+    else:
+        runtime = OopzRuntime()
+        try:
+            runtime.start()
+        except Exception:
+            music_service.close()
+            raise
+        controller = MusicController(settings, runtime)
     set_music_handler(controller)
 
     import uvicorn
@@ -144,8 +158,11 @@ def run(env_file: str | None = None) -> int:
 
     def shutdown(*_args) -> None:
         server.should_exit = True
-        controller.close()
-        runtime.close()
+        if legacy_core_enabled:
+            runtime.close()
+        else:
+            controller.close()
+            runtime.close()
         music_service.close()
 
     api_thread = threading.Thread(target=server.run, name="internal-api", daemon=True)

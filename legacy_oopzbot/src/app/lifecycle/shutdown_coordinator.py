@@ -1,0 +1,50 @@
+from core.logger_config import setup_logger
+
+from app.lifecycle.context import AppContext
+from app.lifecycle.netease_api_runtime import NeteaseApiRuntime
+
+logger = setup_logger("ShutdownCoordinator")
+
+
+class ShutdownCoordinator:
+    """负责关闭应用运行时资源。"""
+
+    def stop(self, context: AppContext | None, netease_runtime: NeteaseApiRuntime) -> None:
+        netease_runtime.stop()
+
+        if context:
+            if context.dispatcher:
+                try:
+                    context.dispatcher.stop()
+                except Exception as exc:
+                    logger.warning("停止消息分发器时出现异常: %s", exc)
+            if context.onebot_v11:
+                try:
+                    context.onebot_v11.stop()
+                except Exception as exc:
+                    logger.warning("停止 OneBot v11 服务时出现异常: %s", exc)
+            try:
+                scheduler = context.handler.services.scheduler
+                scheduler.scheduled.stop()
+                scheduler.reminder.stop()
+            except Exception as exc:
+                logger.warning("停止定时服务时出现异常: %s", exc)
+            try:
+                recall_scheduler = context.handler.services.safety.recall_scheduler
+                recall_scheduler.stop()
+            except Exception as exc:
+                logger.warning("停止自动撤回调度时出现异常: %s", exc)
+
+        try:
+            from core.database import MessageStatsDB
+            MessageStatsDB.stop()
+        except Exception as exc:
+            logger.warning("刷入消息统计缓冲区时出现异常: %s", exc)
+
+        if not context or not context.voice:
+            return
+
+        try:
+            context.voice.destroy()
+        except Exception as exc:
+            logger.warning("销毁语音客户端时出现异常: %s", exc)

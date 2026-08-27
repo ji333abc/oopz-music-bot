@@ -7,18 +7,19 @@
 - QQMusic API：`/home/oopzbot/qqmusic-api/server.mjs`，使用独立 Node.js 进程；
 - JM 临时目录：`/home/oopzbot/jm-tasks`。
 
-迁移后的 Docker Compose 会统一运行三个服务：
+迁移后的 Docker Compose 会统一运行四个服务：
 
-- `bot`：OOPZ 音乐机器人、QQ Bot、JM 下载与 QQ 文件上传；
+- `bot`：迁移前的完整 OOPZ 核心、QQ Bot、JM 下载与 QQ 文件上传；
 - `qqmusic`：项目固定版本的 QQMusic API；
-- `panel`：带登录保护的 Web 管理面板。
+- `panel`：带登录保护的新 Web 管理面板；
+- `redis`：按 OOPZ 域持久化播放队列和播放状态。
 
 建议把新版本安装到 `/opt/oopz-music-bot`，不要覆盖旧目录。这样出现问题时可以直接停容器并恢复旧服务。
 
 ## 迁移前必须知道的事项
 
 1. 同一个 QQ AppID 不能同时运行旧 QQ Bot 和新容器，否则会重复接收消息或互相抢占连接。
-2. 旧版当前播放和待播队列保存在内存中，不能迁移。请选择队列为空时切换，或者接受切换后队列清空。
+2. 旧进程当前播放和待播队列不能无损导入新 Redis。请选择队列为空时切换，或者接受首次切换后队列清空；Docker 启动后的新队列会持久化。
 3. 正在运行的 JM 任务不能断点迁移。先等待任务完成，再执行正式切换。
 4. 旧 JM 压缩包可以手动保留，但不要把整个旧 `jm-tasks` 当成新任务队列导入。
 5. QQ 群文件容量已满时，Docker 版本同样无法上传。面板中的“上传器在线”只表示本地上传程序和依赖正常，不代表群文件空间充足。
@@ -248,6 +249,7 @@ nano .env
 | `QQBOT_ALLOWED_GROUP_OPENIDS` | 允许使用机器人的 QQ 群 OpenID，多个用英文逗号分隔 |
 | `OOPZ_LOGIN_PHONE`、`OOPZ_LOGIN_PASSWORD` | 推荐的 OOPZ 登录方式 |
 | `OOPZ_DEVICE_ID`、`OOPZ_PERSON_UID`、`OOPZ_JWT_TOKEN` | 如果不用账号密码，则三个一起迁移 |
+| `OOPZ_AGORA_APP_ID` | 必填；旧 `config.py` 的 `OOPZ_CONFIG["agora_app_id"]`，不是 QQ AppID |
 | `QQBOT_OOPZ_AREA_ID` | 原 OOPZ 域 ID |
 | `QQBOT_OOPZ_TEXT_CHANNEL_ID` | 原播放通知文字频道 ID |
 | `QQBOT_OOPZ_VOICE_CHANNEL_ID` | 原音乐语音频道 ID |
@@ -260,6 +262,14 @@ nano .env
 | `RACKNERD_API_KEY`、`RACKNERD_API_HASH` | 可选，用于面板服务器资源卡片 |
 
 如果旧版使用的是 `OOPZ_AREA_ID`、`OOPZ_TEXT_CHANNEL_ID` 或 `OOPZ_VOICE_CHANNEL_ID`，必须改成表中的 `QQBOT_OOPZ_*` 新名称。
+
+只读取旧配置中的 Agora App ID（不会输出整份配置）：
+
+```bash
+sudo grep -nE 'agora_app_id' /home/oopzbot/Oopzbot/config.py
+```
+
+把该值填入新 `.env` 的 `OOPZ_AGORA_APP_ID`。不要直接 `cp config.py` 或 `cp private_key.py` 到新项目。
 
 不要把下面这些旧版宿主机绝对路径写进新 `.env`：
 
@@ -286,6 +296,8 @@ QQBOT_ALLOWED_GROUP_OPENIDS=
 OOPZ_LOGIN_METHOD=auto
 OOPZ_LOGIN_PHONE=
 OOPZ_LOGIN_PASSWORD=
+OOPZ_AGORA_APP_ID=
+OOPZBOT_USE_LEGACY_CORE=true
 
 QQBOT_OOPZ_AREA_ID=
 QQBOT_OOPZ_TEXT_CHANNEL_ID=
@@ -301,6 +313,10 @@ OOPZ_PANEL_PORT=3000
 OOPZ_PANEL_USERNAME=admin
 OOPZ_PANEL_PASSWORD=
 
+# 旧版 OOPZ Web 播放页；新面板仍使用 3000
+OOPZ_LEGACY_WEB_BIND=127.0.0.1
+OOPZ_LEGACY_WEB_PORT=18081
+
 QQBOT_JM_ENABLED=true
 QQBOT_JM_ALLOWED_USER_OPENIDS=
 ```
@@ -314,9 +330,29 @@ install -d -m 0750 data
 
 Compose 会把 `./data` 挂载到容器的 `/app/data`。下列内容会保存在这里：
 
+- `data/legacy/` 中的旧核心数据库、登录刷新结果、RSA 私钥、插件状态和日志；
 - JM 临时任务和失败保留文件；
 - JM 耗时统计；
 - 面板 JM 历史、组件状态和操作事件。
+
+账号密码登录会自动生成并保存签名私钥，推荐直接使用这种方式。若只使用静态的 `OOPZ_DEVICE_ID/OOPZ_PERSON_UID/OOPZ_JWT_TOKEN`，还必须从旧部署安全提取 RSA PEM 到 `/opt/oopz-music-bot/data/legacy/private_key.pem` 并设置 `0600` 权限；不要把旧 `private_key.py` 提交到 Git 或发到聊天中。
+
+如果要保留旧版提醒、统计或插件状态，可在停旧服务后迁移旧数据目录；先预览再复制，并排除配置和密钥文件：
+
+```bash
+sudo rsync -a --dry-run \
+  --exclude='config.py' --exclude='private_key.py' --exclude='*.pem' \
+  /home/oopzbot/Oopzbot/data/ /opt/oopz-music-bot/data/legacy/
+sudo rsync -a \
+  --exclude='config.py' --exclude='private_key.py' --exclude='*.pem' \
+  /home/oopzbot/Oopzbot/data/ /opt/oopz-music-bot/data/legacy/
+```
+
+复制后不要直接猜容器用户的 UID；先启动容器，再用下面的命令让容器自身修正目录权限：
+
+```bash
+docker compose run --rm --user root bot sh -lc 'chown -R oopzbot:oopzbot /app/data'
+```
 
 旧版如果存在 `/home/oopzbot/Oopzbot/data/jm_timing.json`，可以迁移它：
 
@@ -399,6 +435,7 @@ docker compose ps
 
 ```bash
 docker compose logs --tail=200 qqmusic
+docker compose logs --tail=100 redis
 docker compose logs --tail=200 bot
 docker compose logs --tail=200 panel
 ```
@@ -409,7 +446,7 @@ docker compose logs --tail=200 panel
 docker compose logs -f bot
 ```
 
-正常情况下应看到 QQ 机器人上线、OOPZ SDK 就绪和内部接口启动，不应持续出现认证失败或反复重连。
+正常情况下应看到 `旧版 OOPZ 核心已启动`、`Agora 浏览器播放器已就绪`、QQ 机器人上线和内部接口启动，不应持续出现认证失败或反复重连。
 
 ## 第四阶段：验证新版本
 
@@ -422,7 +459,7 @@ curl -fsS http://127.0.0.1:3000/api/health
 docker compose exec bot oopzbot check
 ```
 
-`qqmusic`、`bot`、`panel` 最终都应为 `healthy`。
+`redis`、`qqmusic`、`bot`、`panel` 最终都应为 `healthy`。
 
 ### 2. 打开管理面板
 
@@ -463,7 +500,7 @@ http://127.0.0.1:3000
 JM 作品ID
 ```
 
-在 Web 面板确认任务依次经过“读取元数据”“下载与打包”“上传 QQ 群文件”。如果 QQ 被动回复超时，新版会自动尝试主动群消息；QQ 开放平台仍需允许机器人主动消息。
+在 Web 面板确认任务依次经过“读取元数据”“下载与打包”“上传 QQ 群文件”。QQ 被动回复会为重试分配不同的 `msg_seq`，避免被平台判定为重复消息。只有 QQ 开放平台已经授予主动消息权限时，超时后的主动发送兜底才会成功；没有权限时不会把正常的 OOPZ 播放误判为失败。
 
 ## 回滚到旧版本
 
@@ -515,17 +552,18 @@ docker compose logs -f panel
 docker compose down
 ```
 
-`docker compose down` 不会删除宿主机的 `./data`。不要添加 `-v`，本项目虽然使用绑定目录，但迁移和排障时没有必要执行卷删除操作。
+`docker compose down` 不会删除宿主机的 `./data` 或命名卷。不要添加 `-v`：`-v` 会删除保存播放队列的 Redis 卷。
 
 ## 最终检查清单
 
 - [ ] 已保存旧服务文件、旧配置和三类进程的启动方式；
 - [ ] 新代码位于独立目录，没有覆盖 `/home/oopzbot/Oopzbot`；
 - [ ] `.env` 权限为 `0600`，没有复制旧宿主机绝对路径；
+- [ ] 已填写旧版 `agora_app_id` 对应的 `OOPZ_AGORA_APP_ID`；
 - [ ] 已设置 `OOPZ_PANEL_PASSWORD`；
 - [ ] 已确认播放队列为空且没有运行中的 JM 任务；
 - [ ] 已停止旧 `main.py`、`qqbot_service.py` 和 `server.mjs`；
-- [ ] 三个容器均为 `healthy`；
+- [ ] `redis`、`qqmusic`、`bot`、`panel` 四个容器均为 `healthy`；
 - [ ] QQ 搜歌、选歌、队列删除和主动消息兜底正常；
 - [ ] OOPZ 播放与频道成员查询正常；
 - [ ] JM 小任务下载和上传正常；

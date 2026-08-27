@@ -54,6 +54,24 @@ OOPZ_JWT_TOKEN=
 
 不要同时保留一组过期的部分凭据；配置检查会将其视为错误。
 
+## 旧版 OOPZ 核心
+
+Docker Compose 默认启用迁移前的完整 OOPZ 核心：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `OOPZBOT_USE_LEGACY_CORE` | `true`（Compose） | 使用旧版消息、音乐、Sender、WebSocket 和 Agora 核心 |
+| `OOPZ_AGORA_APP_ID` | 空 | 必填；旧 `config.py` 中 `OOPZ_CONFIG.agora_app_id` 的值 |
+| `OOPZ_AGORA_INIT_TIMEOUT` | `180` | 无头 Chromium/Agora 初始化等待秒数 |
+| `OOPZ_LEGACY_WEB_BIND` | `127.0.0.1` | 旧 Web 播放页映射到宿主机的监听地址 |
+| `OOPZ_LEGACY_WEB_PORT` | `18081` | 旧 Web 播放页端口；新管理面板仍是 `3000` |
+| `OOPZ_LEGACY_ADMIN_ENABLED` | `false` | 是否启用旧版管理页面；通常使用新面板即可 |
+| `OOPZ_LEGACY_ADMIN_PASSWORD` | 空 | 启用旧版管理页面时必须设置 |
+
+账号密码登录成功后，刷新得到的 OOPZ 凭据和 RSA 私钥会写入 `data/legacy/`，容器重建后继续使用，不会写回镜像源码。若只迁移静态 `DEVICE_ID/PERSON_UID/JWT_TOKEN`，还必须把旧 RSA 私钥保存为 `data/legacy/private_key.pem`，权限设为 `0600`。
+
+Compose 同时启动 Redis 并启用 AOF。播放队列、当前播放和播放状态按 OOPZ 域隔离保存。不要执行 `docker compose down -v`，否则会删除 Redis 数据卷。
+
 ## 目标频道
 
 | 变量 | 必填 | 说明 |
