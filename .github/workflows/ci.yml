@@ -78,5 +78,5 @@ jobs:
           trap 'rm -f .env "$ci_env"' EXIT
           docker compose config --quiet
           docker compose config --format json > "$RUNNER_TEMP/compose.json"
-          python -c 'import json, pathlib; c=json.loads(pathlib.Path(r"'$RUNNER_TEMP'/compose.json").read_text()); s=c["services"]; ports=[str(p) for name in s for p in (s[name].get("ports") or [])]; assert not any(any(f":{port}:" in p or p.endswith(f":{port}") for p in ports) for port in ("6379", "3200", "18080")); assert any("127.0.0.1" in p and ":3000:" in p for p in ports); assert any("127.0.0.1" in p and ":18081:" in p for p in ports)'
+          python -c 'import json, pathlib; c=json.loads(pathlib.Path(r"'$RUNNER_TEMP'/compose.json").read_text()); s=c["services"]; ports=[(str(p.get("host_ip", "")), str(p.get("published", ""))) if isinstance(p, dict) else (str(p).split(":")[0], str(p).split(":")[1] if ":" in str(p) else "") for name in s for p in (s[name].get("ports") or [])]; print("resolved ports:", ports); assert not any(published in {"6379", "3200", "18080"} for _, published in ports), ports; assert ("127.0.0.1", "3000") in ports, ports; assert ("127.0.0.1", "18081") in ports, ports'
           docker compose build bot qqmusic panel
