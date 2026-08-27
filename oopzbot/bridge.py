@@ -1367,7 +1367,10 @@ def _command_event(command: str, result: dict, source: str) -> None:
 
 def _health_entry(status: str, reason: str) -> dict[str, str]:
     """Create the bounded public shape used by both readiness and Panel."""
-    safe_reason = " ".join(str(reason or "未知原因").split())[:240]
+    safe_reason = redact_secrets(
+        " ".join(str(reason or "未知原因").split()),
+        max_length=240,
+    )
     return {
         "status": status,
         "reason": safe_reason,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import types
 import unittest
@@ -99,6 +100,16 @@ class HealthSnapshotTests(unittest.TestCase):
         snapshot = bridge._service_health(music)
 
         self.assertEqual(snapshot["redis"]["status"], "degraded")
+
+    def test_health_reason_redacts_configured_credentials(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"QQBOT_BRIDGE_TOKEN": "bridge-secret-value"},
+            clear=False,
+        ):
+            entry = bridge._health_entry("error", "request token=bridge-secret-value")
+
+        self.assertNotIn("bridge-secret-value", entry["reason"])
 
     def test_readyz_is_not_ready_without_the_music_handler(self) -> None:
         with patch.object(bridge.requests, "get", side_effect=OSError("offline")):
