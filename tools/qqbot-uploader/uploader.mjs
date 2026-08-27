@@ -103,6 +103,12 @@ export function classifyError(error) {
   const code = Number(error?.bizCode || 0);
 
   if (
+    code === 40034031 ||
+    /msg.?id.*(?:过期|失效|expired|invalid)|消息被去重|回复次数.*(?:上限|超过)/i.test(message)
+  ) {
+    return "expired";
+  }
+  if (
     status === 401 ||
     status === 403 ||
     code === 11255 ||
@@ -166,6 +172,25 @@ export async function uploadWithRetry(
   throw lastError;
 }
 
+export async function sendFileWithFallback(
+  bot,
+  target,
+  source,
+  options,
+  retryDelayMs = RETRY_DELAY_MS,
+) {
+  try {
+    return await uploadWithRetry(bot, target, source, options, retryDelayMs);
+  } catch (error) {
+    if (!target.msgId || classifyError(error) !== "expired") {
+      throw error;
+    }
+    writeLog("warn", "被动文件回复不可用，改用群主动消息上传");
+    const { msgId: _passiveMessageId, ...proactiveTarget } = target;
+    return uploadWithRetry(bot, proactiveTarget, source, options, retryDelayMs);
+  }
+}
+
 async function main() {
   try {
     const args = parseArgs(process.argv.slice(2));
@@ -188,7 +213,7 @@ async function main() {
       logger,
       userAgent: "oopz-qqbot-uploader/1.0.0",
     });
-    const result = await uploadWithRetry(
+    const result = await sendFileWithFallback(
       bot,
       { scope: "group", targetId: groupOpenid, msgId: messageId },
       { localPath: realPath },

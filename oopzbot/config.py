@@ -52,6 +52,7 @@ class Settings:
     qq_music_fallback_quality: str
 
     log_level: str
+    bridge_private_network: bool = False
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -78,11 +79,20 @@ class Settings:
             qq_music_quality=_text("QQ_MUSIC_QUALITY", "320"),
             qq_music_fallback_quality=_text("QQ_MUSIC_FALLBACK_QUALITY", "128"),
             log_level=_text("LOG_LEVEL", "INFO").upper(),
+            bridge_private_network=_boolean(
+                "OOPZBOT_BRIDGE_PRIVATE_NETWORK",
+                False,
+            ),
         )
 
     @property
     def bridge_url(self) -> str:
-        return f"http://{self.bridge_host}:{self.bridge_port}/internal/qqbot/command"
+        host = (
+            "127.0.0.1"
+            if self.bridge_host in {"0.0.0.0", "::"}
+            else self.bridge_host
+        )
+        return f"http://{host}:{self.bridge_port}/internal/qqbot/command"
 
     def validate(self) -> list[str]:
         errors: list[str] = []
@@ -106,8 +116,16 @@ class Settings:
                 "OOPZ 登录未配置：填写 DEVICE_ID/PERSON_UID/JWT_TOKEN，"
                 "或 LOGIN_PHONE/LOGIN_PASSWORD"
             )
-        if self.bridge_host not in {"127.0.0.1", "localhost", "::1"}:
-            errors.append("OOPZBOT_BRIDGE_HOST 必须是回环地址，禁止公开内部桥接接口")
+        loopback_hosts = {"127.0.0.1", "localhost", "::1"}
+        docker_bind_hosts = {"0.0.0.0", "::"}
+        if self.bridge_host not in loopback_hosts:
+            if not (
+                self.bridge_private_network
+                and self.bridge_host in docker_bind_hosts
+            ):
+                errors.append(
+                    "OOPZBOT_BRIDGE_HOST 必须是回环地址；仅 Docker 内网模式可绑定通配地址"
+                )
         if not 1 <= self.bridge_port <= 65535:
             errors.append("OOPZBOT_BRIDGE_PORT 必须在 1-65535 之间")
         if self.qq_music_enabled and not self.qq_music_base_url:

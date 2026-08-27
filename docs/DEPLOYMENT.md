@@ -1,5 +1,7 @@
 # 部署指南
 
+现有 `/home/oopzbot/Oopzbot` 旧版服务器需要迁移时，请使用完整的 [旧版迁移到 Docker 指南](MIGRATION_FROM_LEGACY.md)，不要直接覆盖旧目录或同时启动两套 QQ Bot。
+
 ## Docker Compose
 
 ```bash
@@ -22,7 +24,40 @@ docker compose up -d --build
 docker compose down
 ```
 
-Compose 同时启动 Bot 和固定版本 QQ 音乐 API。音乐接口只在 Compose 内部网络开放，两个服务都不映射主机端口。运行数据挂载到仓库的 `data/`。
+Compose 同时启动 Bot、固定版本 QQ 音乐 API 和 Web 管理面板。音乐接口与机器人命令桥接只在 Compose 内部网络开放；面板默认映射到宿主机 `127.0.0.1:3000`。运行数据挂载到仓库的 `data/`。
+
+面板支持实时播放状态、完整待播队列、搜歌前 10 首、播放控制、删除指定队列歌曲、结构化频道成员、组件健康、真实事件及 JM 任务历史。浏览器不会获得 `QQBOT_BRIDGE_TOKEN`，所有控制请求由面板服务端转发。JM 和事件记录保存在 `data/panel-state.json`，不包含解压密码。
+
+本机查看：
+
+```text
+http://127.0.0.1:3000
+```
+
+首次启动前必须在 `.env` 设置高强度的 `OOPZ_PANEL_PASSWORD`；默认用户名是 `admin`。面板自身启用 HTTP Basic Auth。若使用域名，推荐让现有 Nginx/Caddy 反向代理到这个地址并启用 HTTPS。设置正确的公开地址可用于页面分享信息：
+
+```dotenv
+OOPZ_PANEL_PUBLIC_URL=https://panel.example.com
+```
+
+RackNerd 流量卡片为可选功能；在 `.env` 填写 `RACKNERD_API_KEY` 和 `RACKNERD_API_HASH` 后生效。
+
+Bot 镜像已包含 OOPZ 运行时、Chromium、QQ/JM 机器人及 Node.js 文件上传器；QQ Music API 使用独立容器。长任务优先使用原消息进行被动回复，原消息过期或回复次数耗尽时会自动尝试群主动消息。群主仍需在 QQ 的机器人设置中允许主动消息，否则平台会拒绝该兜底发送。
+
+从旧版 `main.py + qqbot_service.py` 部署迁移时，必须先停止两个旧进程再启动 Compose，避免同一 AppID 重复接收消息。将旧环境变量合并到根目录 `.env`，并把需要保留的数据复制到 `./data/` 后执行：
+
+```bash
+docker compose up -d --build
+docker compose ps
+docker compose logs -f bot
+```
+
+查看全部服务状态或面板日志：
+
+```bash
+docker compose ps
+docker compose logs -f panel
+```
 
 ## systemd
 
