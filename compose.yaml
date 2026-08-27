@@ -6,6 +6,7 @@ services:
     restart: unless-stopped
     environment:
       QQ_MUSIC_COOKIE: ${QQ_MUSIC_COOKIE:-}
+      QQ_MUSIC_API_CONFIG_DIR: /opt/qqmusic-config
     healthcheck:
       test:
         - CMD

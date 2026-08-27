@@ -1,5 +1,7 @@
 "use strict";
 
+const fs = require("node:fs");
+const { createRequire } = require("node:module");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 
@@ -14,19 +16,10 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error(`Invalid QQ Music API port: ${process.env.PORT}`);
 }
 
-// Prevent the upstream module from opening its own listener and checking npm.
-process.env.NODE_ENV = "test";
 process.chdir(serviceDirectory);
-require(path.join(serviceDirectory, "node_modules", "ts-node", "register", "transpile-only"));
 
-async function configureCookie() {
+function parseCookie() {
   const cookie = String(process.env.QQ_MUSIC_COOKIE || "").trim();
-  if (!cookie) return;
-
-  // The upstream TypeScript service keeps its user config in memory. Populate
-  // that config from the container environment before app.ts is loaded, and
-  // also set Axios' default Cookie header for its c.y.qq.com/u.y.qq.com calls.
-  const config = require(path.join(serviceDirectory, "src", "config", "index.ts"));
   const cookieObject = {};
   for (const part of cookie.split(";")) {
     const separator = part.indexOf("=");
@@ -35,13 +28,28 @@ async function configureCookie() {
     const value = part.slice(separator + 1).trim();
     if (key && value) cookieObject[key] = value;
   }
+  return {
+    cookie,
+    cookieObject,
+    loginUin: cookieObject.uin || cookieObject.puin || "",
+  };
+}
+
+async function configureRainCookie() {
+  const { cookie, cookieObject, loginUin } = parseCookie();
+  if (!cookie) return;
+
+  // The upstream TypeScript service keeps its user config in memory. Populate
+  // that config from the container environment before app.ts is loaded, and
+  // also set Axios' default Cookie header for its c.y.qq.com/u.y.qq.com calls.
+  const config = require(path.join(serviceDirectory, "src", "config", "index.ts"));
 
   const user = config.userInfo || config.appConfig?.user;
   if (user) {
     user.cookie = cookie;
     user.cookieList = Object.entries(cookieObject).map(([key, value]) => `${key}=${value}`);
     user.cookieObject = cookieObject;
-    user.uin = cookieObject.uin || user.uin || "";
+    user.uin = loginUin || user.uin || "";
     user.loginUin = user.uin;
   }
   if (config.apiConfig?.commonParams && cookieObject.uin) {
@@ -58,10 +66,70 @@ async function configureCookie() {
   axios.defaults.headers.common.Cookie = cookie;
 }
 
+function configureSansenjianCookie() {
+  const { cookie, loginUin } = parseCookie();
+  const configDirectory = path.resolve(
+    process.env.QQ_MUSIC_API_CONFIG_DIR || path.join(serviceDirectory, "config"),
+  );
+  process.env.QQ_MUSIC_API_CONFIG_DIR = configDirectory;
+  if (cookie) process.env.USE_GLOBAL_COOKIE = "true";
+
+  fs.mkdirSync(configDirectory, { recursive: true });
+  const serviceConfigPath = path.join(configDirectory, "service-config.json");
+  if (!fs.existsSync(serviceConfigPath)) {
+    fs.writeFileSync(
+      serviceConfigPath,
+      JSON.stringify(
+        {
+          fallbackMode: true,
+          useGlobalCookie: Boolean(cookie),
+          cookieParamName: "cookie",
+        },
+        null,
+        2,
+      ) + "\n",
+      { mode: 0o600 },
+    );
+  }
+
+  const userInfoPath = path.join(configDirectory, "user-info.json");
+  if (cookie || !fs.existsSync(userInfoPath)) {
+    fs.writeFileSync(
+      userInfoPath,
+      JSON.stringify({ loginUin, cookie }, null, 2) + "\n",
+      { mode: 0o600 },
+    );
+  }
+}
+
+async function loadApplication() {
+  const sourceEntry = path.join(serviceDirectory, "src", "app.ts");
+  if (fs.existsSync(sourceEntry)) {
+    // Prevent the upstream source module from opening its own listener and
+    // checking npm when the managed Rain120 installation is used.
+    process.env.NODE_ENV = "test";
+    require(path.join(serviceDirectory, "node_modules", "ts-node", "register", "transpile-only"));
+    await configureRainCookie();
+    const loaded = require(sourceEntry);
+    return loaded.default || loaded;
+  }
+
+  // The legacy native deployment imports @sansenjian/qq-music-api. Keep the
+  // same package in Docker so playback behavior remains identical.
+  configureSansenjianCookie();
+  const requireFromService = createRequire(path.join(serviceDirectory, "package.json"));
+  try {
+    const loaded = requireFromService("@sansenjian/qq-music-api");
+    return loaded.default || loaded.app || loaded;
+  } catch (requireError) {
+    const entry = requireFromService.resolve("@sansenjian/qq-music-api");
+    const loaded = await import(pathToFileURL(entry).href);
+    return loaded.default || loaded.app || loaded;
+  }
+}
+
 (async () => {
-  await configureCookie();
-  const loaded = require(path.join(serviceDirectory, "src", "app.ts"));
-  const app = loaded.default || loaded;
+  const app = await loadApplication();
 
   const server = app.listen(port, host, () => {
     console.log(`QQ Music API listening on http://${host}:${port}`);

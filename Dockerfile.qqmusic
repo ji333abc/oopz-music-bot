@@ -1,20 +1,13 @@
 FROM node:22-alpine AS build
 
-RUN apk add --no-cache git
-
 WORKDIR /opt/qqmusic-api
-RUN git init . \
-    && git remote add origin https://github.com/Rain120/qq-music-api.git \
-    && git fetch --depth 1 origin d05420bf098bd2769866eba81cfd48a6d0c6f50c \
-    && git checkout --detach FETCH_HEAD \
-    && test "$(git rev-parse HEAD)" = "d05420bf098bd2769866eba81cfd48a6d0c6f50c" \
-    && npm ci --include=dev --no-audit --no-fund \
-    && rm -rf .git
+RUN npm init -y >/dev/null 2>&1 \
+    && npm install --omit=dev --no-audit --no-fund @sansenjian/qq-music-api@2.4.0
 
 FROM node:22-alpine
 
-LABEL org.opencontainers.image.source="https://github.com/Rain120/qq-music-api" \
-      org.opencontainers.image.revision="d05420bf098bd2769866eba81cfd48a6d0c6f50c" \
+LABEL org.opencontainers.image.source="https://github.com/sansenjian/qq-music-api" \
+      org.opencontainers.image.version="2.4.0" \
       org.opencontainers.image.licenses="MIT"
 
 WORKDIR /opt/qqmusic-api
@@ -22,7 +15,8 @@ COPY --from=build /opt/qqmusic-api ./
 COPY oopzbot/qqmusic_launcher.cjs /opt/oopzbot/qqmusic_launcher.cjs
 
 ENV PORT=3200 \
-    QQ_MUSIC_HOST=0.0.0.0
+    QQ_MUSIC_HOST=0.0.0.0 \
+    QQ_MUSIC_API_CONFIG_DIR=/opt/qqmusic-config
 
 EXPOSE 3200
 CMD ["node", "/opt/oopzbot/qqmusic_launcher.cjs", "/opt/qqmusic-api"]

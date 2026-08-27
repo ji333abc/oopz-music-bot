@@ -5,14 +5,13 @@ from pathlib import Path
 
 
 class DockerConfigurationTests(unittest.TestCase):
-    def test_qqmusic_image_pins_search_fix(self) -> None:
+    def test_qqmusic_image_matches_legacy_native_api(self) -> None:
         root = Path(__file__).resolve().parents[1]
         dockerfile = (root / "Dockerfile.qqmusic").read_text(encoding="utf-8")
 
-        fixed_revision = "d05420bf098bd2769866eba81cfd48a6d0c6f50c"
-        broken_revision = "9fb0756b8b88052d5eafe25848d01cf72b53e281"
-        self.assertIn(fixed_revision, dockerfile)
-        self.assertNotIn(broken_revision, dockerfile)
+        self.assertIn("@sansenjian/qq-music-api@2.4.0", dockerfile)
+        self.assertNotIn("Rain120/qq-music-api", dockerfile)
+        self.assertIn("QQ_MUSIC_API_CONFIG_DIR=/opt/qqmusic-config", dockerfile)
 
     def test_bot_image_and_compose_use_container_jm_paths(self) -> None:
         root = Path(__file__).resolve().parents[1]

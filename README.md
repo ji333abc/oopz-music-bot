@@ -31,7 +31,7 @@ flowchart LR
     SDK --> Voice["OOPZ / Agora 语音频道"]
 ```
 
-机器人、内部 API、队列和 OOPZ SDK 运行在同一个 Python 进程中。本地安装时内部桥接固定监听回环地址；Compose 模式只向私有容器网络开放并保留令牌鉴权。默认使用项目锁定版本的 `Rain120/qq-music-api`，Docker Compose 将音乐接口和 Web 面板作为独立服务运行。
+机器人、内部 API、队列和 OOPZ SDK 运行在同一个 Python 进程中。本地安装时内部桥接固定监听回环地址；Compose 模式只向私有容器网络开放并保留令牌鉴权。Docker Compose 使用与旧版原生部署一致的 `@sansenjian/qq-music-api@2.4.0`，音乐接口和 Web 面板作为独立服务运行。
 
 详细设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 

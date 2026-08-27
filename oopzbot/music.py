@@ -174,8 +174,8 @@ class QQMusic:
             if url:
                 return url
 
-        # The managed Rain120 service only exposes /getMusicPlay.  Do not
-        # probe the obsolete /song/url route: it returns 404 for every song
+        # Both supported QQ Music API services expose /getMusicPlay.  Do not
+        # probe the obsolete /song/url route: it returns 404 on current APIs
         # and obscures the real reason when QQ marks a track unplayable.
         return None
 
