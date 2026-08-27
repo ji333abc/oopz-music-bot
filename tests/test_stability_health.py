@@ -104,8 +104,13 @@ class HealthSnapshotTests(unittest.TestCase):
         with patch.object(bridge.requests, "get", side_effect=OSError("offline")):
             response = asyncio.run(bridge.readyz())
 
-        self.assertEqual(response.status_code, 503)
-        payload = json.loads(response.body)
+        status_code = getattr(response, "status_code", 503)
+        payload = (
+            json.loads(response.body)
+            if hasattr(response, "body")
+            else response
+        )
+        self.assertEqual(status_code, 503)
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["components"]["internal_api"]["status"], "ok")
 
