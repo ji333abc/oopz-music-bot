@@ -202,7 +202,8 @@ free -h
 ```bash
 sudo install -d -o root -g root /opt/oopz-music-bot
 cd /opt
-git clone https://github.com/ji333abc/oopz-music-bot.git oopz-music-bot
+git clone --branch codex/interactive-installer-qqmusic --single-branch \
+  https://github.com/ji333abc/oopz-music-bot.git oopz-music-bot
 cd /opt/oopz-music-bot
 ```
 
