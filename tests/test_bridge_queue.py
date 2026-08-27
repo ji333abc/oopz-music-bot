@@ -51,6 +51,36 @@ class _FakeMusic:
         ][:limit]
 
 
+class _LegacyQueue:
+    """Minimal shape exposed by the embedded legacy Redis QueueManager."""
+
+    def __init__(self, items: list[dict]) -> None:
+        self.items = [dict(item) for item in items]
+
+    def get_current(self):
+        return None
+
+    def get_queue(self) -> list[dict]:
+        return [dict(item) for item in self.items]
+
+    def get_queue_length(self) -> int:
+        return len(self.items)
+
+    def remove_from_queue(self, index: int) -> bool:
+        if index < 0 or index >= len(self.items):
+            return False
+        self.items.pop(index)
+        return True
+
+
+class _LegacyMusic:
+    def __init__(self, items: list[dict]) -> None:
+        self.queue = _LegacyQueue(items)
+
+    def _get_queue(self, _area: str) -> _LegacyQueue:
+        return self.queue
+
+
 class _FakeSender:
     def get_area_channels(self, area: str, quiet: bool = True) -> list[dict]:
         del area, quiet
@@ -117,6 +147,33 @@ class QueuePanelTests(unittest.TestCase):
             [item["name"] for item in result["queue_items"]],
             ["one", "three"],
         )
+
+    def test_remove_positions_supports_legacy_redis_queue(self) -> None:
+        music = _LegacyMusic(
+            [
+                {"name": name, "artists": "artist"}
+                for name in ("one", "two", "three", "four")
+            ]
+        )
+
+        result = bridge._remove_queue_items(music, "area", [2, 4])
+
+        self.assertTrue(result["ok"])
+        self.assertIn("two、four", result["message"])
+        self.assertEqual(
+            [item["name"] for item in result["queue_items"]],
+            ["one", "three"],
+        )
+
+    def test_invalid_legacy_position_does_not_partially_delete(self) -> None:
+        music = _LegacyMusic(
+            [{"name": "one", "artists": "artist"}]
+        )
+
+        result = bridge._remove_queue_items(music, "area", [1, 2])
+
+        self.assertFalse(result["ok"])
+        self.assertEqual([item["name"] for item in music.queue.items], ["one"])
 
     def test_queue_position_parser_accepts_spaces_and_commas(self) -> None:
         self.assertEqual(bridge._parse_queue_positions("2 5,7，9"), [2, 5, 7, 9])

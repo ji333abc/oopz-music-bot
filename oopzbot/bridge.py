@@ -911,7 +911,25 @@ def _parse_queue_positions(value: str) -> list[int] | None:
 def _remove_queue_items(music, area: str, positions: list[int]) -> dict:
     queue = music._get_queue(area)
     try:
-        removed = queue.remove_positions(positions)
+        remove_positions = getattr(queue, "remove_positions", None)
+        if callable(remove_positions):
+            removed = remove_positions(positions)
+        else:
+            # The embedded legacy Redis queue exposes remove_from_queue with
+            # zero-based indexes. Validate every requested position before
+            # mutating, then delete from the end so earlier indexes stay valid.
+            pending = queue.get_queue()
+            normalized = sorted(set(positions))
+            if (
+                not normalized
+                or normalized[0] < 1
+                or normalized[-1] > len(pending)
+            ):
+                raise IndexError("queue position out of range")
+            removed = [pending[position - 1] for position in normalized]
+            for position in reversed(normalized):
+                if queue.remove_from_queue(position - 1) is False:
+                    raise RuntimeError(f"删除队列位置 {position} 失败")
     except IndexError:
         length = queue.get_queue_length()
         if not length:
