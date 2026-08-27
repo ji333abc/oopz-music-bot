@@ -32,6 +32,7 @@ python scripts/init_config.py
 | `QQBOT_APP_SECRET` | 是 | QQ 开放平台机器人 App Secret |
 | `QQBOT_BRIDGE_TOKEN` | 是 | 初始化脚本自动生成 |
 | `QQBOT_ALLOWED_GROUP_OPENIDS` | 否 | 逗号分隔；为空表示不限制群 |
+| `QQBOT_COMMAND_DEFER_SECONDS` | 否 | 默认 `2.5`；命令超过该时长时先回复处理中，完成后主动发送结果 |
 
 ## OOPZ 登录
 

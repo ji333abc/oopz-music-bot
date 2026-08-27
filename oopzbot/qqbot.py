@@ -89,6 +89,10 @@ JM_ALLOWED_USERS = {
     for item in (os.getenv("QQBOT_JM_ALLOWED_USER_OPENIDS") or "").split(",")
     if item.strip()
 }
+COMMAND_DEFER_SECONDS = max(
+    0.1,
+    float(os.getenv("QQBOT_COMMAND_DEFER_SECONDS") or "2.5"),
+)
 ALLOWED_GROUPS = {
     item.strip()
     for item in (os.getenv("QQBOT_ALLOWED_GROUP_OPENIDS") or "").split(",")
@@ -100,6 +104,17 @@ _seen_lock = Lock()
 _jm_job_lock = Lock()
 _jm_timing_lock = Lock()
 _jm_tasks: set[asyncio.Task] = set()
+_command_tasks: set[asyncio.Task] = set()
+_active_msg_seq_lock = Lock()
+_active_msg_seq = secrets.randbelow(65535)
+
+
+def _next_active_msg_seq() -> int:
+    """Return a process-wide sequence for proactive group messages."""
+    global _active_msg_seq
+    with _active_msg_seq_lock:
+        _active_msg_seq = (_active_msg_seq % 65535) + 1
+        return _active_msg_seq
 
 
 def _passive_reply_unavailable(error: Exception) -> bool:
@@ -119,6 +134,17 @@ def _passive_reply_unavailable(error: Exception) -> bool:
             "回复次数已达上限",
             "超过回复次数",
         )
+    )
+
+
+def _group_message_request_timed_out(error: Exception) -> bool:
+    if isinstance(error, (TimeoutError, asyncio.TimeoutError)):
+        return True
+    name = type(error).__name__.lower()
+    normalized = str(error).replace(" ", "").lower()
+    return "timeout" in name or any(
+        marker in normalized
+        for marker in ("请求超时", "timedout", "timeout", "连接超时")
     )
 
 
@@ -458,28 +484,43 @@ class OopzQQClient(botpy.Client):
         try:
             await message._api.post_group_message(**request)
         except Exception as exc:
-            if "msg_id" not in request or not _passive_reply_unavailable(exc):
+            fallback_allowed = _passive_reply_unavailable(
+                exc
+            ) or _group_message_request_timed_out(exc)
+            if "msg_id" not in request or not fallback_allowed:
                 raise
 
             logger.warning(
-                "被动回复不可用，改为主动群消息发送: group_openid=%s error=%s",
+                "被动回复失败，改为主动群消息发送: group_openid=%s error=%s",
                 message.group_openid,
                 str(exc).replace("\n", " ")[-300:],
             )
             request.pop("msg_id", None)
-            request.pop("msg_seq", None)
+            request["msg_seq"] = _next_active_msg_seq()
             await message._api.post_group_message(**request)
+
+    @staticmethod
+    def _reply_identity(
+        message: GroupMessage,
+        msg_seq: int = 1,
+        *,
+        proactive: bool = False,
+    ) -> dict:
+        if proactive:
+            return {"msg_seq": _next_active_msg_seq()}
+        return {"msg_id": message.id, "msg_seq": msg_seq}
 
     async def _reply(
         self,
         message: GroupMessage,
         content: str,
         msg_seq: int = 1,
+        *,
+        proactive: bool = False,
     ) -> None:
         payload = {
             "msg_type": 0,
-            "msg_id": message.id,
-            "msg_seq": msg_seq,
+            **self._reply_identity(message, msg_seq, proactive=proactive),
             "content": content[:1000],
         }
         await self._post_group_message(message, payload)
@@ -622,6 +663,8 @@ class OopzQQClient(botpy.Client):
         message: GroupMessage,
         result: dict,
         requester_id: str,
+        *,
+        proactive: bool = False,
     ) -> None:
         ranks = result.get("ranks") or []
         lines = ["# QQ音乐排行榜", ""]
@@ -643,8 +686,7 @@ class OopzQQClient(botpy.Client):
                 message,
                 {
                     "msg_type": 2,
-                    "msg_id": message.id,
-                    "msg_seq": 1,
+                    **self._reply_identity(message, proactive=proactive),
                     "markdown": {"content": "\n".join(lines)},
                     "keyboard": self._command_keyboard(
                         items,
@@ -655,13 +697,19 @@ class OopzQQClient(botpy.Client):
             )
         except Exception as exc:
             logger.warning("QQ 排行榜菜单发送失败，退回纯文本: %s", exc)
-            await self._reply(message, str(result.get("message") or "排行榜不可用"))
+            await self._reply(
+                message,
+                str(result.get("message") or "排行榜不可用"),
+                proactive=proactive,
+            )
 
     async def _reply_rank_results(
         self,
         message: GroupMessage,
         result: dict,
         requester_id: str,
+        *,
+        proactive: bool = False,
     ) -> None:
         title = str(result.get("title") or "QQ音乐排行榜")
         songs = result.get("songs") or []
@@ -686,8 +734,7 @@ class OopzQQClient(botpy.Client):
                 message,
                 {
                     "msg_type": 2,
-                    "msg_id": message.id,
-                    "msg_seq": 1,
+                    **self._reply_identity(message, proactive=proactive),
                     "markdown": {"content": "\n".join(lines)},
                     "keyboard": self._command_keyboard(
                         items,
@@ -699,21 +746,26 @@ class OopzQQClient(botpy.Client):
             )
         except Exception as exc:
             logger.warning("QQ 排行榜详情发送失败，退回纯文本: %s", exc)
-            await self._reply(message, str(result.get("message") or "榜单不可用"))
+            await self._reply(
+                message,
+                str(result.get("message") or "榜单不可用"),
+                proactive=proactive,
+            )
 
     async def _reply_search_results(
         self,
         message: GroupMessage,
         result: dict,
         requester_id: str,
+        *,
+        proactive: bool = False,
     ) -> None:
         try:
             await self._post_group_message(
                 message,
                 {
                     "msg_type": 2,
-                    "msg_id": message.id,
-                    "msg_seq": 1,
+                    **self._reply_identity(message, proactive=proactive),
                     "markdown": {"content": self._search_markdown(result)},
                     "keyboard": self._search_keyboard(result, requester_id),
                 },
@@ -723,12 +775,15 @@ class OopzQQClient(botpy.Client):
             await self._reply(
                 message,
                 str(result.get("message") or "未找到歌曲"),
+                proactive=proactive,
             )
 
     async def _reply_song_selected(
         self,
         message: GroupMessage,
         result: dict,
+        *,
+        proactive: bool = False,
     ) -> None:
         song = result.get("song") or {}
         name = str(song.get("name") or "未知歌曲")
@@ -760,8 +815,7 @@ class OopzQQClient(botpy.Client):
                     message,
                     {
                         "msg_type": 1,
-                        "msg_id": message.id,
-                        "msg_seq": 1,
+                        **self._reply_identity(message, proactive=proactive),
                         "content": fallback,
                         "media": media,
                     },
@@ -775,27 +829,32 @@ class OopzQQClient(botpy.Client):
                 message,
                 {
                     "msg_type": 2,
-                    "msg_id": message.id,
-                    "msg_seq": 1,
+                    **self._reply_identity(message, proactive=proactive),
                     "markdown": {"content": markdown},
                 },
             )
         except Exception as exc:
             logger.warning("QQ Markdown 歌曲信息发送失败，退回纯文本: %s", exc)
-            await self._reply(message, fallback, msg_seq=1)
+            await self._reply(
+                message,
+                fallback,
+                msg_seq=1,
+                proactive=proactive,
+            )
 
     async def _reply_queue_panel(
         self,
         message: GroupMessage,
         result: dict,
         requester_id: str,
+        *,
+        proactive: bool = False,
     ) -> None:
         items = result.get("queue_items") or []
         try:
             payload = {
                 "msg_type": 2,
-                "msg_id": message.id,
-                "msg_seq": 1,
+                **self._reply_identity(message, proactive=proactive),
                 "markdown": {"content": self._queue_markdown(result)},
             }
             if items:
@@ -803,33 +862,48 @@ class OopzQQClient(botpy.Client):
             await self._post_group_message(message, payload)
         except Exception as exc:
             logger.warning("QQ 队列面板发送失败，退回纯文本: %s", exc)
-            await self._reply(message, str(result.get("message") or "队列为空"))
+            await self._reply(
+                message,
+                str(result.get("message") or "队列为空"),
+                proactive=proactive,
+            )
 
     async def _reply_result(
         self,
         message: GroupMessage,
         result: dict,
         requester_id: str,
+        *,
+        proactive: bool = False,
     ) -> None:
         reply_type = str(result.get("reply_type") or "")
         if reply_type == "search_results" and result.get("songs"):
-            await self._reply_search_results(message, result, requester_id)
+            await self._reply_search_results(
+                message, result, requester_id, proactive=proactive
+            )
             return
         if reply_type == "rank_catalog" and result.get("ranks"):
-            await self._reply_rank_catalog(message, result, requester_id)
+            await self._reply_rank_catalog(
+                message, result, requester_id, proactive=proactive
+            )
             return
         if reply_type == "rank_results" and result.get("songs"):
-            await self._reply_rank_results(message, result, requester_id)
+            await self._reply_rank_results(
+                message, result, requester_id, proactive=proactive
+            )
             return
         if reply_type == "song_selected" and result.get("song"):
-            await self._reply_song_selected(message, result)
+            await self._reply_song_selected(message, result, proactive=proactive)
             return
         if reply_type == "queue_panel":
-            await self._reply_queue_panel(message, result, requester_id)
+            await self._reply_queue_panel(
+                message, result, requester_id, proactive=proactive
+            )
             return
         await self._reply(
             message,
             str(result.get("message") or "命令已处理"),
+            proactive=proactive,
         )
 
     async def _run_jm_job(
@@ -1254,6 +1328,31 @@ class OopzQQClient(botpy.Client):
             _jm_job_lock.release()
             raise
 
+    async def _deliver_deferred_command(
+        self,
+        message: GroupMessage,
+        bridge_task: asyncio.Task,
+        requester_id: str,
+    ) -> None:
+        try:
+            result = await bridge_task
+        except requests.RequestException as exc:
+            logger.error("连接 Oopzbot 桥接接口失败: %s", exc)
+            result = {"ok": False, "message": "Oopzbot 当前不可用，请稍后再试"}
+        except Exception:
+            logger.exception("处理 QQ 群命令失败")
+            result = {"ok": False, "message": "处理命令时发生错误"}
+
+        try:
+            await self._reply_result(
+                message,
+                result,
+                requester_id,
+                proactive=True,
+            )
+        except Exception:
+            logger.exception("主动发送 QQ 群命令结果失败")
+
     async def on_group_at_message_create(self, message: GroupMessage):
         group_openid = str(message.group_openid or "").strip()
         message_id = str(message.id or "").strip()
@@ -1326,14 +1425,35 @@ class OopzQQClient(botpy.Client):
                 )
             return
 
-        try:
-            result = await asyncio.to_thread(
+        bridge_task = asyncio.create_task(
+            asyncio.to_thread(
                 _forward_command,
                 command,
                 requester_id,
                 requester_name,
                 group_openid,
             )
+        )
+        try:
+            result = await asyncio.wait_for(
+                asyncio.shield(bridge_task),
+                timeout=COMMAND_DEFER_SECONDS,
+            )
+        except TimeoutError:
+            try:
+                await self._reply(message, "正在处理，请稍候……")
+            except Exception:
+                logger.exception("发送 QQ 群处理中提示失败，命令继续执行")
+            delivery_task = asyncio.create_task(
+                self._deliver_deferred_command(
+                    message,
+                    bridge_task,
+                    requester_id,
+                )
+            )
+            _command_tasks.add(delivery_task)
+            delivery_task.add_done_callback(_command_tasks.discard)
+            return
         except requests.RequestException as exc:
             logger.error("连接 Oopzbot 桥接接口失败: %s", exc)
             result = {"ok": False, "message": "Oopzbot 当前不可用，请稍后再试"}

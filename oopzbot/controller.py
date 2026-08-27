@@ -108,10 +108,12 @@ class MusicController:
         self._queues: dict[str, MusicQueue] = {settings.oopz_area_id: self.queue}
         self._queues_lock = threading.Lock()
         self._playback_lock = threading.RLock()
+        self._voice_operation_lock = threading.Lock()
         self._voice_channel_id: str | None = None
         self._voice_channel_area: str | None = None
         self._play_start_time = 0.0
         self._play_duration = 0.0
+        self._play_generation = 0
         self._closed = threading.Event()
         self._monitor = threading.Thread(target=self._monitor_playback, daemon=True)
         self._monitor.start()
@@ -233,35 +235,63 @@ class MusicController:
         if not song.get("url"):
             raise RuntimeError("歌曲没有播放地址")
         queue.set_current(song)
-        self._play_start_time = time.time()
+        self._play_generation += 1
+        generation = self._play_generation
+        self._play_start_time = 0.0
         self._play_duration = max(0.0, float(song.get("duration_ms") or 0) / 1000)
         queue.set_play_state(
             {
-                "start_time": self._play_start_time,
+                "start_time": 0.0,
                 "duration": self._play_duration,
                 "loading": True,
             }
         )
+        threading.Thread(
+            target=self._start_song_audio,
+            args=(song, queue, generation),
+            name=f"oopz-play-{generation}",
+            daemon=True,
+        ).start()
+
+    def _start_song_audio(
+        self,
+        song: dict,
+        queue: MusicQueue,
+        generation: int,
+    ) -> None:
         try:
-            self.voice.play_audio(song["url"])
+            with self._voice_operation_lock:
+                self.voice.play_audio(song["url"])
         except Exception:
-            queue.clear_current()
-            queue.clear_play_state()
-            raise
-        queue.set_play_state(
-            {
-                "start_time": self._play_start_time,
-                "duration": self._play_duration,
-                "loading": False,
-            }
-        )
+            logger.exception("OOPZ 音频启动失败: %s", song.get("name") or "未知歌曲")
+            with self._playback_lock:
+                current = queue.get_current() or {}
+                if generation == self._play_generation and current.get("url") == song.get("url"):
+                    queue.clear_current()
+                    queue.clear_play_state()
+            return
+
+        with self._playback_lock:
+            current = queue.get_current() or {}
+            if generation != self._play_generation or current.get("url") != song.get("url"):
+                return
+            self._play_start_time = time.time()
+            queue.set_play_state(
+                {
+                    "start_time": self._play_start_time,
+                    "duration": self._play_duration,
+                    "loading": False,
+                }
+            )
 
     def play_next(self, channel: str, area: str, user: str = "") -> dict:
         del user
         queue = self._get_queue(area)
         with self._playback_lock:
+            self._play_generation += 1
             try:
-                self.voice.stop_audio()
+                with self._voice_operation_lock:
+                    self.voice.stop_audio()
             except Exception:
                 logger.debug("停止当前音频失败", exc_info=True)
             queue.clear_current()
@@ -280,8 +310,10 @@ class MusicController:
     def stop_play(self, channel: str, area: str) -> dict:
         del channel
         with self._playback_lock:
+            self._play_generation += 1
             try:
-                self.voice.stop_audio()
+                with self._voice_operation_lock:
+                    self.voice.stop_audio()
             finally:
                 self._get_queue(area).clear()
                 self._play_start_time = 0

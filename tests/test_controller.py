@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 import unittest
 
 from oopzbot.config import Settings
@@ -14,6 +16,7 @@ class _FakeRuntime:
         self.played: list[str] = []
         self.messages: list[tuple[str, str, str]] = []
         self.fail_messages = False
+        self.play_gate: threading.Event | None = None
 
     def join_voice(self, area: str, channel: str) -> None:
         self.joined = (area, channel)
@@ -26,6 +29,8 @@ class _FakeRuntime:
 
         class Voice:
             async def play_url(inner_self, url):
+                if self.play_gate is not None:
+                    self.play_gate.wait(1)
                 self.played.append(url)
                 return {"ok": True}
 
@@ -130,9 +135,16 @@ class MusicControllerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.controller._closed.set()
 
+    def _wait_for_play_count(self, count: int) -> None:
+        deadline = time.monotonic() + 1
+        while len(self.runtime.played) < count and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertGreaterEqual(len(self.runtime.played), count)
+
     def test_first_song_plays_and_second_song_queues(self) -> None:
         first = self.controller.play_song("first", "qq", "text", "area", "user")
         second = self.controller.play_song("second", "qq", "text", "area", "user")
+        self._wait_for_play_count(1)
 
         self.assertEqual(first["code"], "success")
         self.assertEqual(second["code"], "success")
@@ -143,6 +155,7 @@ class MusicControllerTests(unittest.TestCase):
         self.controller.play_song("first", "qq", "text", "area", "user")
         self.controller.play_song("second", "qq", "text", "area", "user")
         self.controller.play_next("text", "area")
+        self._wait_for_play_count(2)
         self.assertEqual(self.runtime.played[-1], "https://audio.invalid/second.mp3")
         self.assertEqual(self.controller._get_queue("area").get_current()["name"], "second")
 
@@ -150,9 +163,24 @@ class MusicControllerTests(unittest.TestCase):
         self.runtime.fail_messages = True
 
         result = self.controller.play_song("first", "qq", "text", "area", "user")
+        self._wait_for_play_count(1)
 
         self.assertEqual(result["code"], "success")
         self.assertEqual(self.runtime.played, ["https://audio.invalid/first.mp3"])
+
+    def test_play_request_does_not_wait_for_voice_startup(self) -> None:
+        self.runtime.play_gate = threading.Event()
+
+        started = time.monotonic()
+        result = self.controller.play_song("first", "qq", "text", "area", "user")
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(result["code"], "success")
+        self.assertLess(elapsed, 0.2)
+        state = self.controller._get_queue("area").get_play_state()
+        self.assertTrue(state["loading"])
+        self.runtime.play_gate.set()
+        self._wait_for_play_count(1)
 
 
 if __name__ == "__main__":
