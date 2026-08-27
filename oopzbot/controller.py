@@ -136,6 +136,25 @@ class MusicController:
             logger.exception("进入 OOPZ 语音频道失败")
             return {"error": str(exc)}
 
+    def notify_message(self, *, text: str, channel: str, area: str, **kwargs) -> bool:
+        """Send a best-effort OOPZ text notification.
+
+        Playback state is committed before this notification is sent. A text
+        channel outage must therefore not turn a successful voice playback
+        command into an HTTP 500 response to the QQ bridge.
+        """
+        try:
+            self.sender.send_message(
+                text=text,
+                channel=channel,
+                area=area,
+                **kwargs,
+            )
+        except Exception as exc:
+            logger.warning("OOPZ 文字消息发送失败，继续播放: %s", exc)
+            return False
+        return True
+
     def search_candidates(self, keyword: str, platform: str = "qq", limit: int = 5) -> list[dict]:
         adapter = self.platforms.get(platform)
         return adapter.search_many(keyword, limit=limit) if adapter else []
@@ -189,7 +208,7 @@ class MusicController:
         platform = str(song.get("platform") or "qq")
         data = self._resolve_playable(song, platform, channel, area, user)
         result = self._commit_song_request(data, prefix="已点歌")
-        self.sender.send_message(
+        self.notify_message(
             text=result["message"],
             channel=channel,
             area=area,
@@ -251,7 +270,7 @@ class MusicController:
             if not next_song:
                 return {"code": "success", "message": "队列已空"}
             self._start_song(next_song, queue)
-            self.sender.send_message(
+            self.notify_message(
                 text=f"正在播放：{next_song['name']} - {next_song['artists']}",
                 channel=channel,
                 area=area,

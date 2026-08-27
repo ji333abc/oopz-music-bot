@@ -127,6 +127,19 @@ def _qq_music_api_get(path: str, params: dict | None = None) -> dict | None:
         return None
 
 
+def _notify_music(music, *, text: str, channel: str, area: str, **kwargs) -> bool:
+    """Send an OOPZ notification without failing the already-started action."""
+    notifier = getattr(music, "notify_message", None)
+    if callable(notifier):
+        return bool(notifier(text=text, channel=channel, area=area, **kwargs))
+    try:
+        music.sender.send_message(text=text, channel=channel, area=area, **kwargs)
+    except Exception as exc:
+        logger.warning("OOPZ 文字消息发送失败，继续执行: %s", exc)
+        return False
+    return True
+
+
 def _rank_catalog() -> dict:
     lines = ["QQ音乐排行榜"]
     for rank_id, title in _QQ_RANKS:
@@ -428,7 +441,8 @@ def _queue_rank_songs(
         first_data,
         prefix=f"{user_name} 从搜歌结果中选择了",
     )
-    music.sender.send_message(
+    _notify_music(
+        music,
         text=first_result["message"],
         attachments=first_result.get("attachments", []),
         channel=text_channel,

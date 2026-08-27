@@ -13,6 +13,7 @@ class _FakeRuntime:
     def __init__(self) -> None:
         self.played: list[str] = []
         self.messages: list[tuple[str, str, str]] = []
+        self.fail_messages = False
 
     def join_voice(self, area: str, channel: str) -> None:
         self.joined = (area, channel)
@@ -42,6 +43,8 @@ class _FakeRuntime:
         return asyncio.run(operation(Bot()))
 
     def send_message(self, text: str, area: str, channel: str):
+        if self.fail_messages:
+            raise RuntimeError("text channel unavailable")
         self.messages.append((text, area, channel))
 
     def user_name(self, uid: str) -> str:
@@ -142,6 +145,14 @@ class MusicControllerTests(unittest.TestCase):
         self.controller.play_next("text", "area")
         self.assertEqual(self.runtime.played[-1], "https://audio.invalid/second.mp3")
         self.assertEqual(self.controller._get_queue("area").get_current()["name"], "second")
+
+    def test_playback_succeeds_when_text_notification_fails(self) -> None:
+        self.runtime.fail_messages = True
+
+        result = self.controller.play_song("first", "qq", "text", "area", "user")
+
+        self.assertEqual(result["code"], "success")
+        self.assertEqual(self.runtime.played, ["https://audio.invalid/first.mp3"])
 
 
 if __name__ == "__main__":
