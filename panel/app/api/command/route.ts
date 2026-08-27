@@ -13,7 +13,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { response, result } = await callBridge(command, panelRequester(request));
+    const requestedCommandId = request.headers.get("x-request-id") || undefined;
+    const { response, result } = await callBridge(
+      command,
+      panelRequester(request),
+      requestedCommandId,
+    );
     return NextResponse.json(result, {
       status: response.status,
       headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" },

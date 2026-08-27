@@ -19,6 +19,11 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from .config import get_settings
+from .observability import (
+    command_context,
+    current_command_id,
+    ensure_command_id,
+)
 from .operations import operations
 
 logger = logging.getLogger("QQBotBridge")
@@ -1040,7 +1045,7 @@ def _select_song(
     }
 
 
-def _execute_command(command: str, requester_key: str) -> dict:
+def _execute_command_impl(command: str, requester_key: str) -> dict:
     with _command_lock:
         music = _music_handler()
         if music is None:
@@ -1283,6 +1288,24 @@ def _execute_command(command: str, requester_key: str) -> dict:
             "ok": False,
             "message": "无法识别命令。请使用：面板、搜歌 <歌名>、点歌 <歌名>、暂停、继续、切歌、停止",
         }
+
+
+def _execute_command(
+    command: str,
+    requester_key: str,
+    command_id: str | None = None,
+) -> dict:
+    """Run one command with a stable correlation ID across worker threads."""
+    correlation_id = ensure_command_id(command_id or current_command_id())
+    with command_context(correlation_id):
+        logger.info("开始处理命令 command=%r", command)
+        try:
+            result = _execute_command_impl(command, requester_key)
+        except Exception:
+            logger.exception("命令处理失败 command=%r", command)
+            raise
+        logger.info("命令处理完成 ok=%s", bool(result.get("ok")))
+        return result
 
 
 def _bridge_request_allowed(request: Request) -> JSONResponse | None:
@@ -1540,18 +1563,30 @@ async def qqbot_command(request: Request):
             status_code=400,
         )
 
+    command_id = ensure_command_id(body.get("command_id"))
     try:
         requester_id = str(body.get("requester_id") or "anonymous").strip()
         requester_name = str(body.get("requester_name") or requester_id).strip()
         group_openid = str(body.get("group_openid") or "unknown-group").strip()
         requester_key = f"{group_openid}:{requester_id}"
-        result = await asyncio.to_thread(_execute_command, command, requester_key)
-        _command_event(command, result, requester_name)
-        return JSONResponse(result)
+        with command_context(command_id):
+            result = await asyncio.to_thread(
+                _execute_command,
+                command,
+                requester_key,
+                command_id,
+            )
+            _command_event(command, result, requester_name)
+        return JSONResponse({**result, "command_id": command_id})
     except Exception as exc:
-        logger.exception("执行 QQBot 桥接命令失败")
+        with command_context(command_id):
+            logger.exception("执行 QQBot 桥接命令失败")
         return JSONResponse(
-            {"ok": False, "message": f"执行失败: {type(exc).__name__}"},
+            {
+                "ok": False,
+                "message": f"执行失败: {type(exc).__name__}",
+                "command_id": command_id,
+            },
             status_code=500,
         )
 

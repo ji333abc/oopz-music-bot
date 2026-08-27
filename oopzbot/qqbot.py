@@ -21,6 +21,7 @@ import requests
 from botpy.message import GroupMessage
 
 from .operations import operations
+from .observability import command_context, ensure_command_id
 from .process_env import minimal_child_environment
 
 logger = logging.getLogger("QQBotService")
@@ -470,7 +471,9 @@ def _forward_command(
     requester_id: str,
     requester_name: str,
     group_openid: str,
+    command_id: str | None = None,
 ) -> dict:
+    correlation_id = ensure_command_id(command_id)
     response = requests.post(
         BRIDGE_URL,
         json={
@@ -478,6 +481,7 @@ def _forward_command(
             "requester_id": requester_id,
             "requester_name": requester_name,
             "group_openid": group_openid,
+            "command_id": correlation_id,
         },
         headers={"X-QQBot-Bridge-Token": BRIDGE_TOKEN},
         timeout=180,
@@ -568,6 +572,11 @@ class OopzQQClient(botpy.Client):
             "content": plain_content[:1000],
         }
         await self._post_group_message(message, payload)
+        logger.info(
+            "QQ 群回复已发送 group_openid=%s proactive=%s",
+            message.group_openid,
+            proactive,
+        )
 
     @staticmethod
     def _search_markdown(result: dict) -> str:
@@ -1356,27 +1365,33 @@ class OopzQQClient(botpy.Client):
         message: GroupMessage,
         bridge_task: asyncio.Task,
         requester_id: str,
+        command_id: str | None = None,
     ) -> None:
-        try:
-            result = await bridge_task
-        except requests.RequestException as exc:
-            logger.error("连接 Oopzbot 桥接接口失败: %s", exc)
-            result = {"ok": False, "message": "Oopzbot 当前不可用，请稍后再试"}
-        except Exception:
-            logger.exception("处理 QQ 群命令失败")
-            result = {"ok": False, "message": "处理命令时发生错误"}
+        with command_context(command_id):
+            try:
+                result = await bridge_task
+            except requests.RequestException as exc:
+                logger.error("连接 Oopzbot 桥接接口失败: %s", exc)
+                result = {"ok": False, "message": "Oopzbot 当前不可用，请稍后再试"}
+            except Exception:
+                logger.exception("处理 QQ 群命令失败")
+                result = {"ok": False, "message": "处理命令时发生错误"}
 
-        try:
-            await self._reply_result(
-                message,
-                result,
-                requester_id,
-                proactive=False,
-            )
-        except Exception:
-            logger.exception("发送 QQ 群命令结果失败")
+            try:
+                await self._reply_result(
+                    message,
+                    result,
+                    requester_id,
+                    proactive=False,
+                )
+            except Exception:
+                logger.exception("发送 QQ 群命令结果失败")
 
-    async def on_group_at_message_create(self, message: GroupMessage):
+    async def _handle_group_at_message_create(
+        self,
+        message: GroupMessage,
+        command_id: str,
+    ):
         group_openid = str(message.group_openid or "").strip()
         message_id = str(message.id or "").strip()
         command = str(message.content or "").strip()
@@ -1455,6 +1470,7 @@ class OopzQQClient(botpy.Client):
                 requester_id,
                 requester_name,
                 group_openid,
+                command_id,
             )
         )
         try:
@@ -1468,6 +1484,7 @@ class OopzQQClient(botpy.Client):
                     message,
                     bridge_task,
                     requester_id,
+                    command_id,
                 )
             )
             _command_tasks.add(delivery_task)
@@ -1484,6 +1501,12 @@ class OopzQQClient(botpy.Client):
             await self._reply_result(message, result, requester_id)
         except Exception:
             logger.exception("回复 QQ 群消息失败")
+
+    async def on_group_at_message_create(self, message: GroupMessage):
+        command_id = ensure_command_id(getattr(message, "command_id", None))
+        with command_context(command_id):
+            logger.info("QQ 命令入口 command_id=%s", command_id)
+            return await self._handle_group_at_message_create(message, command_id)
 
 
 def main() -> None:

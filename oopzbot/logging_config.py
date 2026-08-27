@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import logging
 
+from .observability import RedactionFilter, install_log_record_factory
 
-LOG_FORMAT = "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
+
+LOG_FORMAT = "%(asctime)s [%(name)s] %(levelname)s command_id=%(command_id)s: %(message)s"
 
 
 def is_console_handler(handler: logging.Handler) -> bool:
@@ -31,6 +33,7 @@ def configure_logging(level: str | int = logging.INFO) -> logging.Handler:
             logging.INFO,
         )
 
+    install_log_record_factory()
     root = logging.getLogger()
     console = next(
         (handler for handler in root.handlers if is_console_handler(handler)),
@@ -42,5 +45,7 @@ def configure_logging(level: str | int = logging.INFO) -> logging.Handler:
 
     console.setLevel(numeric_level)
     console.setFormatter(logging.Formatter(LOG_FORMAT))
+    if not any(isinstance(item, RedactionFilter) for item in console.filters):
+        console.addFilter(RedactionFilter())
     root.setLevel(numeric_level)
     return console

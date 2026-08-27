@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 const DEFAULT_COMMAND_ENDPOINT =
   "http://127.0.0.1:18080/internal/qqbot/command";
 const DEFAULT_SNAPSHOT_ENDPOINT =
@@ -14,7 +16,11 @@ function bridgeToken(): string {
   return token;
 }
 
-export async function callBridge(command: string, requesterId: string): Promise<{
+export async function callBridge(
+  command: string,
+  requesterId: string,
+  commandId = randomUUID(),
+): Promise<{
   response: Response;
   result: BridgeResult;
 }> {
@@ -31,6 +37,7 @@ export async function callBridge(command: string, requesterId: string): Promise<
       requester_id: requesterId,
       requester_name: `Web 面板 ${requesterId.slice(-8)}`,
       group_openid: "server-panel",
+      command_id: commandId,
     }),
     cache: "no-store",
     signal: AbortSignal.timeout(15_000),
