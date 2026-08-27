@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "oopz-music-bot"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Self-hosted QQ music bot for OOPZ voice channels"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -57,6 +57,9 @@ oopzbot-jm-worker = "oopzbot.jm_worker:main"
 
 [tool.setuptools.packages.find]
 include = ["oopzbot*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "oopzbot.__version__"}
 
 [tool.setuptools.package-data]
 oopzbot = ["env.example", "qqmusic_launcher.cjs"]

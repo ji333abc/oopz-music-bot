@@ -11,6 +11,22 @@ docker compose up -d --build
 docker compose logs -f bot
 ```
 
+发布或升级前先保存数据和 Redis 快照：
+
+```bash
+python scripts/backup.py --data-dir data --output backups/pre-deploy-$(date -u +%Y%m%dT%H%M%SZ).zip
+docker compose config --quiet
+```
+
+备份默认不包含 `.env`。需要恢复时先停止 Bot，使用已校验的归档并显式确认：
+
+```bash
+python scripts/restore.py backups/<verified-backup>.zip --data-dir data --component all --confirm
+docker compose up -d
+```
+
+恢复会先自动备份当前数据，不使用删除数据卷的命令。
+
 更新：
 
 ```bash
@@ -33,6 +49,11 @@ Compose 同时启动 Bot、固定版本 QQ 音乐 API 和 Web 管理面板。音
 ```text
 http://127.0.0.1:3000
 ```
+
+Bot 的存活和就绪检查分别为 `http://127.0.0.1:18080/healthz` 与
+`http://127.0.0.1:18080/readyz`。`healthz` 不访问外部服务；`readyz` 会在有限超时内返回
+Redis、QQMusic、OOPZ WebSocket、OOPZ 语音、QQ Bot 和旧核心组件状态。面板的状态接口
+直接消费同一份组件快照。
 
 首次启动前必须在 `.env` 设置高强度的 `OOPZ_PANEL_PASSWORD`；默认用户名是 `admin`。面板自身启用 HTTP Basic Auth。若使用域名，推荐让现有 Nginx/Caddy 反向代理到这个地址并启用 HTTPS。设置正确的公开地址可用于页面分享信息：
 

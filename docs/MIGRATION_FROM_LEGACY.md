@@ -626,3 +626,33 @@ docker compose down
 - [ ] OOPZ 播放与频道成员查询正常；
 - [ ] JM 小任务下载和上传正常；
 - [ ] 已验证回滚步骤，但尚未删除旧目录。
+
+## 稳定性基线新增项
+
+迁移完成后，先在测试环境执行备份和配置检查：
+
+```bash
+cd /opt/oopz-music-bot
+python scripts/backup.py --data-dir data --output backups/pre-migration-$(date -u +%Y%m%dT%H%M%SZ).zip
+docker compose config --quiet
+```
+
+备份包含宿主机 `data/` 和通过 Docker Redis 容器生成的 RDB 快照，manifest 包含当前 Git
+提交、Compose 文件校验和备份时间；默认不包含 `.env`。恢复前必须停止 Bot，使用校验通过的
+归档并显式确认：
+
+```bash
+python scripts/restore.py backups/<verified-backup>.zip --data-dir data --component all --confirm
+```
+
+恢复工具会先生成 `oopz-backups/pre-restore-*.zip`，拒绝校验失败或路径穿越归档，并且不会
+替换 `.env`。可使用 `--component data` 单独恢复文件，或使用 `--component redis` 单独恢复
+Redis；Redis 恢复会重启 Redis 服务，不会删除数据卷。
+
+迁移后可用 Bot 的 `/healthz` 检查进程存活，用 `/readyz` 检查内部 API、旧核心、Redis、
+QQMusic、OOPZ WebSocket、OOPZ 语音和 QQ Bot 状态。Panel 状态接口消费同一份快照；外部
+服务故障时面板仍应可启动。命令日志使用 `command_id` 关联，且不应出现 QQ Secret、Token、
+Cookie、JWT、密码或私钥。
+
+本阶段无需修改 `.env`，现有字段和值保持兼容。发布、测试验收和回滚步骤见
+[docs/RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md)。
