@@ -25,6 +25,17 @@ def _env_level(env_key: str, default: int) -> int:
 _initialized = False
 
 
+def _is_console_handler(handler: logging.Handler) -> bool:
+    return isinstance(handler, logging.StreamHandler) and not isinstance(
+        handler,
+        logging.FileHandler,
+    )
+
+
+def _has_console_handler(logger: logging.Logger) -> bool:
+    return any(_is_console_handler(handler) for handler in logger.handlers)
+
+
 def _ensure_log_dir():
     os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -83,14 +94,14 @@ def setup_logger(name: str, level=logging.DEBUG) -> logging.Logger:
             sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
             sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-        console_handler = logging.StreamHandler(sys.stderr)
-        console_handler.setLevel(console_level)
-        console_handler.setFormatter(formatter)
-
         root = logging.getLogger()
         root.setLevel(min(file_level, console_level))
         root.addHandler(file_handler)
-        root.addHandler(console_handler)
+        if not _has_console_handler(root):
+            console_handler = logging.StreamHandler(sys.stderr)
+            console_handler.setLevel(console_level)
+            console_handler.setFormatter(formatter)
+            root.addHandler(console_handler)
 
         _initialized = True
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import logging
 import os
 import shutil
 import signal
@@ -15,6 +14,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from .logging_config import configure_logging
+
 
 def _load_environment(path: str | None = None) -> Path:
     env_path = Path(path or os.getenv("OOPZBOT_ENV_FILE", ".env")).resolve()
@@ -22,13 +23,6 @@ def _load_environment(path: str | None = None) -> Path:
         env_path.chmod(0o600)
     load_dotenv(env_path, override=False)
     return env_path
-
-
-def _configure_logging(level: str) -> None:
-    logging.basicConfig(
-        level=getattr(logging, level, logging.INFO),
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    )
 
 
 def check_config(env_file: str | None = None) -> int:
@@ -114,7 +108,7 @@ def run(env_file: str | None = None) -> int:
 
     clear_settings_cache()
     settings = get_settings()
-    _configure_logging(settings.log_level)
+    configure_logging(settings.log_level)
     errors = settings.validate()
     if errors:
         raise SystemExit("配置无效：\n- " + "\n- ".join(errors))

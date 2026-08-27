@@ -23,10 +23,6 @@ from botpy.message import GroupMessage
 from .operations import operations
 from .process_env import minimal_child_environment
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-)
 logger = logging.getLogger("QQBotService")
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -1553,4 +1549,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    from .logging_config import configure_logging
+
+    configure_logging(os.getenv("LOG_LEVEL") or "INFO")
     main()
