@@ -13,7 +13,24 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
-_LEGACY_ROOT = _PROJECT_ROOT / "legacy_oopzbot"
+
+
+def _resolve_legacy_root() -> Path:
+    """Locate the copied legacy tree in both a checkout and an installed image."""
+    configured = str(os.getenv("OOPZ_LEGACY_SOURCE_ROOT") or "").strip()
+    candidates = [
+        Path(configured) if configured else None,
+        _PROJECT_ROOT / "legacy_oopzbot",
+        Path("/app/legacy_oopzbot"),
+        Path.cwd() / "legacy_oopzbot",
+    ]
+    for candidate in candidates:
+        if candidate is not None and (candidate / "src").is_dir():
+            return candidate
+    return _PROJECT_ROOT / "legacy_oopzbot"
+
+
+_LEGACY_ROOT = _resolve_legacy_root()
 _LEGACY_SRC = _LEGACY_ROOT / "src"
 
 

@@ -49,6 +49,7 @@ services:
       QQBOT_JM_TIMING_PATH: /app/data/jm_timing.json
       OOPZBOT_USE_LEGACY_CORE: "true"
       OOPZ_LEGACY_DATA_DIR: /app/data/legacy
+      OOPZ_LEGACY_SOURCE_ROOT: /app/legacy_oopzbot
       BOT_REDIS_HOST: redis
       BOT_REDIS_PORT: "6379"
       BOT_REDIS_PASSWORD: ""

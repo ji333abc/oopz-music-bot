@@ -40,6 +40,8 @@ class DockerConfigurationTests(unittest.TestCase):
         self.assertIn("redis:7.4-alpine", compose)
         self.assertIn("redis-data:/data", compose)
         self.assertIn("OOPZ_LEGACY_DATA_DIR: /app/data/legacy", compose)
+        self.assertIn("OOPZ_LEGACY_SOURCE_ROOT: /app/legacy_oopzbot", compose)
+        self.assertIn("OOPZ_LEGACY_SOURCE_ROOT=/app/legacy_oopzbot", dockerfile)
 
 
 if __name__ == "__main__":

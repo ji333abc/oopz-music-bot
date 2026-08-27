@@ -7,6 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     QQBOT_JM_TEMP_ROOT=/app/data/jm-tasks \
     QQBOT_JM_TIMING_PATH=/app/data/jm_timing.json \
     OOPZ_LEGACY_DATA_DIR=/app/data/legacy \
+    OOPZ_LEGACY_SOURCE_ROOT=/app/legacy_oopzbot \
     BOT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium \
     BOT_CHROMEDRIVER_PATH=/usr/bin/chromedriver \
     PYTHONPATH=/app/legacy_oopzbot:/app/legacy_oopzbot/src
