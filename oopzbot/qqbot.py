@@ -105,16 +105,16 @@ _jm_job_lock = Lock()
 _jm_timing_lock = Lock()
 _jm_tasks: set[asyncio.Task] = set()
 _command_tasks: set[asyncio.Task] = set()
-_active_msg_seq_lock = Lock()
-_active_msg_seq = secrets.randbelow(65535)
+_msg_seq_lock = Lock()
+_msg_seq = secrets.randbelow(65535)
 
 
-def _next_active_msg_seq() -> int:
-    """Return a process-wide sequence for proactive group messages."""
-    global _active_msg_seq
-    with _active_msg_seq_lock:
-        _active_msg_seq = (_active_msg_seq % 65535) + 1
-        return _active_msg_seq
+def _next_msg_seq() -> int:
+    """Return a process-wide unique sequence for every group message."""
+    global _msg_seq
+    with _msg_seq_lock:
+        _msg_seq = (_msg_seq % 65535) + 1
+        return _msg_seq
 
 
 def _passive_reply_unavailable(error: Exception) -> bool:
@@ -130,11 +130,15 @@ def _passive_reply_unavailable(error: Exception) -> bool:
         marker in normalized
         for marker in (
             "消息id已失效",
-            "消息被去重",
             "回复次数已达上限",
             "超过回复次数",
         )
     )
+
+
+def _group_message_was_deduplicated(error: Exception) -> bool:
+    normalized = str(error).replace(" ", "").lower()
+    return "40054005" in normalized or "消息被去重" in normalized
 
 
 def _group_message_request_timed_out(error: Exception) -> bool:
@@ -484,6 +488,22 @@ class OopzQQClient(botpy.Client):
         try:
             await message._api.post_group_message(**request)
         except Exception as exc:
+            retry_passive = _group_message_was_deduplicated(
+                exc
+            ) or _group_message_request_timed_out(exc)
+            if "msg_id" in request and retry_passive:
+                logger.warning(
+                    "被动回复失败，换新 msg_seq 重试: group_openid=%s error=%s",
+                    message.group_openid,
+                    str(exc).replace("\n", " ")[-300:],
+                )
+                request["msg_seq"] = _next_msg_seq()
+                try:
+                    await message._api.post_group_message(**request)
+                    return
+                except Exception as retry_exc:
+                    exc = retry_exc
+
             fallback_allowed = _passive_reply_unavailable(
                 exc
             ) or _group_message_request_timed_out(exc)
@@ -496,7 +516,7 @@ class OopzQQClient(botpy.Client):
                 str(exc).replace("\n", " ")[-300:],
             )
             request.pop("msg_id", None)
-            request["msg_seq"] = _next_active_msg_seq()
+            request["msg_seq"] = _next_msg_seq()
             await message._api.post_group_message(**request)
 
     @staticmethod
@@ -506,9 +526,10 @@ class OopzQQClient(botpy.Client):
         *,
         proactive: bool = False,
     ) -> dict:
+        del msg_seq
         if proactive:
-            return {"msg_seq": _next_active_msg_seq()}
-        return {"msg_id": message.id, "msg_seq": msg_seq}
+            return {"msg_seq": _next_msg_seq()}
+        return {"msg_id": message.id, "msg_seq": _next_msg_seq()}
 
     async def _reply(
         self,
@@ -1348,10 +1369,10 @@ class OopzQQClient(botpy.Client):
                 message,
                 result,
                 requester_id,
-                proactive=True,
+                proactive=False,
             )
         except Exception:
-            logger.exception("主动发送 QQ 群命令结果失败")
+            logger.exception("发送 QQ 群命令结果失败")
 
     async def on_group_at_message_create(self, message: GroupMessage):
         group_openid = str(message.group_openid or "").strip()
@@ -1412,7 +1433,7 @@ class OopzQQClient(botpy.Client):
                     {
                         "msg_type": 7,
                         "msg_id": message.id,
-                        "msg_seq": 1,
+                        "msg_seq": _next_msg_seq(),
                         "media": media,
                     },
                 )

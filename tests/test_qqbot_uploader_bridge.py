@@ -69,9 +69,9 @@ class GroupReplyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(api.calls), 2)
         self.assertEqual(api.calls[0]["msg_id"], "message-1")
-        self.assertEqual(api.calls[0]["msg_seq"], 3)
         self.assertNotIn("msg_id", api.calls[1])
         self.assertIsInstance(api.calls[1]["msg_seq"], int)
+        self.assertNotEqual(api.calls[0]["msg_seq"], api.calls[1]["msg_seq"])
         self.assertEqual(api.calls[1]["content"], "done")
 
     async def test_other_reply_errors_are_not_retried(self) -> None:
@@ -95,7 +95,7 @@ class GroupReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("msg_id", api.calls[1])
         self.assertIsInstance(api.calls[1]["msg_seq"], int)
 
-    async def test_timeout_falls_back_to_active_group_message(self) -> None:
+    async def test_timeout_retries_passive_reply_with_new_sequence(self) -> None:
         api = _FakeGroupAPI(TimeoutError("请求超时"))
         message = _FakeGroupMessage(api)
         client = object.__new__(service.OopzQQClient)
@@ -104,7 +104,19 @@ class GroupReplyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(api.calls), 2)
         self.assertEqual(api.calls[0]["msg_id"], "message-1")
-        self.assertNotIn("msg_id", api.calls[1])
+        self.assertEqual(api.calls[1]["msg_id"], "message-1")
+        self.assertNotEqual(api.calls[0]["msg_seq"], api.calls[1]["msg_seq"])
+
+    async def test_deduplication_retries_passive_reply_with_new_sequence(self) -> None:
+        api = _FakeGroupAPI(RuntimeError("40054005 消息被去重，请检查请求msgseq"))
+        message = _FakeGroupMessage(api)
+        client = object.__new__(service.OopzQQClient)
+
+        await client._reply(message, "done")
+
+        self.assertEqual(len(api.calls), 2)
+        self.assertEqual(api.calls[0]["msg_id"], "message-1")
+        self.assertEqual(api.calls[1]["msg_id"], "message-1")
         self.assertNotEqual(api.calls[0]["msg_seq"], api.calls[1]["msg_seq"])
 
     async def test_proactive_reply_uses_unique_sequence_without_msg_id(self) -> None:
@@ -119,7 +131,19 @@ class GroupReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("msg_id", api.calls[1])
         self.assertNotEqual(api.calls[0]["msg_seq"], api.calls[1]["msg_seq"])
 
-    async def test_slow_bridge_acknowledges_then_sends_result_proactively(self) -> None:
+    async def test_passive_replies_also_use_unique_sequences(self) -> None:
+        api = _FakeGroupAPI()
+        message = _FakeGroupMessage(api)
+        client = object.__new__(service.OopzQQClient)
+
+        await client._reply(message, "one", msg_seq=1)
+        await client._reply(message, "two", msg_seq=1)
+
+        self.assertEqual(api.calls[0]["msg_id"], "message-1")
+        self.assertEqual(api.calls[1]["msg_id"], "message-1")
+        self.assertNotEqual(api.calls[0]["msg_seq"], api.calls[1]["msg_seq"])
+
+    async def test_slow_bridge_acknowledges_then_sends_passive_result(self) -> None:
         api = _FakeGroupAPI()
         message = _FakeGroupMessage(
             api,
@@ -146,7 +170,8 @@ class GroupReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(api.calls[0]["content"], "正在处理，请稍候……")
         self.assertEqual(api.calls[0]["msg_id"], message.id)
         self.assertEqual(api.calls[1]["content"], "已点歌：测试歌曲")
-        self.assertNotIn("msg_id", api.calls[1])
+        self.assertEqual(api.calls[1]["msg_id"], message.id)
+        self.assertNotEqual(api.calls[0]["msg_seq"], api.calls[1]["msg_seq"])
 
 
 class JMCommandParserTests(unittest.TestCase):
