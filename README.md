@@ -50,7 +50,8 @@ cd oopz-music-bot
 python scripts/init_config.py
 ```
 
-编辑 `.env`，至少填写 QQ Bot、OOPZ 登录信息和目标频道，然后执行：
+配置脚本会把 `.env` 权限限制为 `0600`。编辑 `.env`，至少填写 QQ Bot、OOPZ
+登录信息、目标频道和面板密码，然后执行：
 
 ```bash
 docker compose up -d --build
@@ -58,6 +59,9 @@ docker compose logs -f bot
 ```
 
 Compose 会启动 `bot`、`redis`、固定版本的 `qqmusic` 和 `panel`。音乐接口和机器人桥接只在容器内部网络开放；新面板默认监听宿主机 `127.0.0.1:3000`，旧版 OOPZ Web 播放页默认监听 `127.0.0.1:18081`。新面板自带 HTTP Basic Auth（启动前必须设置 `OOPZ_PANEL_PASSWORD`），适合由 Nginx/Caddy 加 HTTPS 后对外提供。
+
+Bot 容器的入口会在首次启动时修正 `./data` 挂载目录的所有权，然后立即降权为
+`oopzbot` 用户运行；不需要预先猜测镜像内 UID。
 
 ### 方式二：本地安装
 

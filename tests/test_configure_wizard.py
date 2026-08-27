@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -61,13 +62,25 @@ class ConfigureWizardTests(unittest.TestCase):
             write_values(
                 template,
                 output,
-                {"SECRET": "has spaces # and = signs", "PLAIN": "abc-123"},
+                {
+                    "SECRET": "has spaces # and = signs $HOME and 'quote'\\",
+                    "PLAIN": "abc-123",
+                },
             )
 
             self.assertEqual(
                 read_values(output),
-                {"SECRET": "has spaces # and = signs", "PLAIN": "abc-123"},
+                {
+                    "SECRET": "has spaces # and = signs $HOME and 'quote'\\",
+                    "PLAIN": "abc-123",
+                },
             )
+            self.assertIn(
+                "SECRET='has spaces # and = signs $HOME and \\'quote\\'\\\\'",
+                output.read_text(encoding="utf-8"),
+            )
+            if __import__("os").name != "nt":
+                self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
 
     def test_new_configuration_walks_through_required_fields(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

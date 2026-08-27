@@ -18,6 +18,8 @@ from dotenv import load_dotenv
 
 def _load_environment(path: str | None = None) -> Path:
     env_path = Path(path or os.getenv("OOPZBOT_ENV_FILE", ".env")).resolve()
+    if env_path.is_file():
+        env_path.chmod(0o600)
     load_dotenv(env_path, override=False)
     return env_path
 
@@ -68,7 +70,8 @@ def init_config(env_file: str | None = None) -> int:
                 encoding="utf-8"
             )
             env_path.write_text(template, encoding="utf-8", newline="\n")
-        print(f"已创建配置文件：{env_path}")
+    env_path.chmod(0o600)
+    print(f"配置文件已就绪：{env_path}")
     load_dotenv(env_path, override=True)
     from .config import ensure_bridge_token
 

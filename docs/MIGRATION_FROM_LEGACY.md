@@ -393,12 +393,27 @@ docker compose build panel
 - 没有 JM 下载或上传任务；
 - QQ 群文件仍有可用空间。
 
-### 2. 停止旧版三类进程
+### 2. 停止旧版全部进程和辅助服务
 
-先停止 systemd 主服务：
+旧部署可能把机器人、面板、桥接和 QQMusic 分成多个 systemd 单元。只停止
+`oopzbot.service` 不够；遗留面板会继续占用 `3000`，遗留 QQMusic 也会在重启后
+再次出现。先查看实际存在的单元：
 
 ```bash
-sudo systemctl disable --now oopzbot
+sudo systemctl list-units --type=service --all | \
+grep -Ei 'oopz|qqbot|qqmusic|panel'
+```
+
+再停用属于旧部署的已知单元；不存在的单元会被安全跳过：
+
+```bash
+for legacy_unit in \
+  oopzbot.service oopz-panel.service qqbot-bridge.service qqmusic-api.service
+do
+  if sudo systemctl cat "$legacy_unit" >/dev/null 2>&1; then
+    sudo systemctl disable --now "$legacy_unit"
+  fi
+done
 ```
 
 再次列出遗留进程：
@@ -423,7 +438,50 @@ pgrep -af '/home/oopzbot/Oopzbot|/home/oopzbot/qqmusic-api|qqbot_service.py' || 
 sudo ss -ltnp | grep -E ':(3000|3200|18080)\b' || true
 ```
 
-### 3. 启动 Docker 新版
+如果端口仍被占用，不要直接换 Docker 端口。先确认监听进程属于哪个 systemd 单元：
+
+```bash
+sudo lsof -nP -iTCP:3000 -sTCP:LISTEN
+sudo cat /proc/监听进程PID/cgroup
+```
+
+### 3. 清理旧面板的 Nginx 路由
+
+如果域名以前指向旧面板，先定位配置并备份：
+
+```bash
+sudo nginx -T 2>/dev/null | grep -n -A35 -B5 'server_name .*panel'
+sudo cp -a /etc/nginx/sites-enabled/你的面板配置 \
+  /root/oopz-panel-nginx.backup
+```
+
+新面板已经自带 HTTP Basic Auth。HTTPS `server` 中应删除旧的
+`auth_basic`、`auth_basic_user_file`，以及直接转发到旧 `18080` 的
+`location = /api/command`、`location /music-api/` 等特殊路由。所有页面和 API
+统一交给新面板：
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 60s;
+    proxy_send_timeout 60s;
+    proxy_buffering off;
+}
+```
+
+保留已有证书配置，然后验证并重载：
+
+```bash
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+### 4. 启动 Docker 新版
 
 ```bash
 cd /opt/oopz-music-bot

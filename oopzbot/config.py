@@ -161,6 +161,8 @@ def ensure_bridge_token(env_path: Path) -> str:
     """Append a generated bridge token when a local env file omitted it."""
     current = _text("QQBOT_BRIDGE_TOKEN")
     if current:
+        if env_path.exists():
+            env_path.chmod(0o600)
         return current
     token = secrets.token_urlsafe(32)
     content = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
@@ -170,6 +172,7 @@ def ensure_bridge_token(env_path: Path) -> str:
     else:
         content = content.rstrip() + f"\n{line}\n"
     env_path.write_text(content, encoding="utf-8", newline="\n")
+    env_path.chmod(0o600)
     os.environ["QQBOT_BRIDGE_TOKEN"] = token
     clear_settings_cache()
     return token

@@ -28,6 +28,8 @@ def read_values(path: Path) -> dict[str, str]:
                 value = json.loads(value)
             except json.JSONDecodeError:
                 pass
+        elif value.startswith("'") and value.endswith("'"):
+            value = value[1:-1].replace("\\'", "'").replace("\\\\", "\\")
         values[key.strip()] = value
     return values
 
@@ -35,7 +37,12 @@ def read_values(path: Path) -> dict[str, str]:
 def encode_value(value: str) -> str:
     if re.fullmatch(r"[A-Za-z0-9_./:@+,-]*", value):
         return value
-    return json.dumps(value, ensure_ascii=False)
+    if "\n" in value or "\r" in value:
+        raise ValueError("环境变量不能包含换行符")
+    # Compose interpolates $VAR in unquoted and double-quoted .env values.
+    # Single quotes keep secrets literal in both Compose and python-dotenv.
+    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+    return "'" + escaped + "'"
 
 
 def write_values(template: Path, output: Path, values: dict[str, str]) -> None:
@@ -56,6 +63,7 @@ def write_values(template: Path, output: Path, values: dict[str, str]) -> None:
         result.extend(["", "# ---------- 安装向导补充 ----------"])
         result.extend(f"{key}={encode_value(values[key])}" for key in missing)
     output.write_text("\n".join(result).rstrip() + "\n", encoding="utf-8", newline="\n")
+    output.chmod(0o600)
 
 
 def choose(question: str, options: list[str], default: int = 1) -> int:

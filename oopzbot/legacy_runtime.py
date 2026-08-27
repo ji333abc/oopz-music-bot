@@ -78,6 +78,13 @@ class LegacyOopzCore:
             os.getenv("OOPZ_LEGACY_DATA_DIR") or _PROJECT_ROOT / "data" / "legacy"
         )
         data_dir.mkdir(parents=True, exist_ok=True)
+        data_dir.chmod(0o700)
+        for credential_file in (
+            data_dir / "oopz_credentials.json",
+            data_dir / "private_key.pem",
+        ):
+            if credential_file.is_file():
+                credential_file.chmod(0o600)
 
         import config as legacy_config
         from app.lifecycle import (

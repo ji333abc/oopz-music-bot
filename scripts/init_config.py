@@ -25,6 +25,7 @@ def main() -> None:
         1,
     )
     output.write_text(content, encoding="utf-8", newline="\n")
+    output.chmod(0o600)
     print(f"已创建 {output}")
     print("已生成随机内部 Token，请继续填写其他必填项。")
 

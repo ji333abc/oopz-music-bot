@@ -51,6 +51,19 @@ class _FakeMusic:
         ][:limit]
 
 
+class _FailedPlaybackMusic(_FakeMusic):
+    def __init__(self) -> None:
+        super().__init__()
+        self._voice_channel_id = "voice"
+        self._voice_channel_area = "area"
+
+    def play_song(self, *_args) -> dict:
+        return {"code": "error", "message": "暂无播放链接"}
+
+    def play_song_choice(self, *_args) -> dict:
+        return {"code": "error", "message": "歌曲不可播放"}
+
+
 class _LegacyQueue:
     """Minimal shape exposed by the embedded legacy Redis QueueManager."""
 
@@ -243,6 +256,42 @@ class SearchResultTests(unittest.TestCase):
         self.assertEqual(music.search_limit, 10)
         self.assertEqual(len(result["songs"]), 10)
         self.assertEqual(result["songs"][-1]["index"], 10)
+
+    def test_failed_song_selection_is_reported_and_session_is_retained(self) -> None:
+        music = _FailedPlaybackMusic()
+        requester = "group:failed-selection"
+        bridge._search_songs(music, "hello", requester)
+
+        result = bridge._select_song(
+            music,
+            index=1,
+            requester_key=requester,
+            area="area",
+            text_channel="text",
+            voice_channel="voice",
+            bot_user="bot",
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["message"], "歌曲不可播放")
+        self.assertIn(requester, bridge._search_sessions)
+
+    def test_failed_direct_play_is_not_reported_as_submitted(self) -> None:
+        music = _FailedPlaybackMusic()
+        previous_dependency = bridge._music_dependency
+        bridge._music_dependency = music
+        try:
+            with patch.object(
+                bridge,
+                "_command_config",
+                return_value=("area", "text", "voice", "bot"),
+            ):
+                result = bridge._execute_command("播放 hello", "group:user")
+        finally:
+            bridge._music_dependency = previous_dependency
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["message"], "暂无播放链接")
 
 
 if __name__ == "__main__":

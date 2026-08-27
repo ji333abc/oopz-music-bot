@@ -189,6 +189,33 @@ class JMCommandParserTests(unittest.TestCase):
         self.assertEqual(service._parse_jm_album_ids("播放 111111"), [])
         self.assertEqual(service._parse_jm_album_ids("JM 123,456"), [])
 
+    def test_jm_children_receive_only_required_application_secrets(self) -> None:
+        with patch.dict(
+            service.os.environ,
+            {
+                "PATH": "test-path",
+                "QQBOT_APP_ID": "app-id",
+                "QQBOT_APP_SECRET": "app-secret",
+                "QQBOT_JM_MAX_BYTES": "123",
+                "QQBOT_JM_TEMP_ROOT": "/tmp/jm",
+                "OOPZ_JWT_TOKEN": "must-not-leak",
+                "OOPZ_PANEL_PASSWORD": "must-not-leak",
+                "RACKNERD_API_HASH": "must-not-leak",
+            },
+            clear=True,
+        ):
+            worker = service._jm_worker_environment("zip-password")
+            uploader = service._jm_uploader_environment()
+
+        self.assertEqual(worker["JM_ZIP_PASSWORD"], "zip-password")
+        self.assertEqual(worker["QQBOT_JM_MAX_BYTES"], "123")
+        self.assertNotIn("QQBOT_APP_SECRET", worker)
+        self.assertEqual(uploader["QQBOT_APP_SECRET"], "app-secret")
+        self.assertEqual(uploader["QQBOT_JM_TEMP_ROOT"], "/tmp/jm")
+        for secret in ("OOPZ_JWT_TOKEN", "OOPZ_PANEL_PASSWORD", "RACKNERD_API_HASH"):
+            self.assertNotIn(secret, worker)
+            self.assertNotIn(secret, uploader)
+
 
 class UploadBridgeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:

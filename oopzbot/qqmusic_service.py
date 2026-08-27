@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import shutil
 import subprocess
 import time
@@ -14,6 +13,7 @@ from urllib.parse import urlsplit
 import requests
 
 from .config import Settings
+from .process_env import minimal_child_environment
 
 logger = logging.getLogger("QQMusicService")
 
@@ -74,27 +74,6 @@ def managed_installation_errors(directory: Path) -> list[str]:
     return errors
 
 
-def _minimal_child_environment() -> dict[str, str]:
-    allowed = {
-        "COMSPEC",
-        "HOME",
-        "LANG",
-        "LC_ALL",
-        "LOCALAPPDATA",
-        "PATH",
-        "PATHEXT",
-        "SYSTEMDRIVE",
-        "SYSTEMROOT",
-        "TEMP",
-        "TMP",
-        "TMPDIR",
-        "USER",
-        "USERPROFILE",
-        "WINDIR",
-    }
-    return {key: value for key, value in os.environ.items() if key.upper() in allowed}
-
-
 class ManagedQQMusicService:
     """Start the pinned API as a child process and stop only processes we own."""
 
@@ -138,7 +117,7 @@ class ManagedQQMusicService:
         host = parsed.hostname or "127.0.0.1"
         port = parsed.port or 80
         launcher = Path(__file__).with_name("qqmusic_launcher.cjs")
-        child_env = _minimal_child_environment()
+        child_env = minimal_child_environment()
         child_env.update(
             PORT=str(port),
             QQ_MUSIC_HOST=host,

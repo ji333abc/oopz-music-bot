@@ -13,7 +13,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app/legacy_oopzbot:/app/legacy_oopzbot/src
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends chromium chromium-driver nodejs npm ca-certificates \
+    && apt-get install -y --no-install-recommends chromium chromium-driver nodejs npm ca-certificates gosu \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -22,15 +22,16 @@ COPY pyproject.toml README.md LICENSE ./
 COPY oopzbot ./oopzbot
 COPY legacy_oopzbot ./legacy_oopzbot
 COPY tools/qqbot-uploader ./tools/qqbot-uploader
+COPY docker-entrypoint.sh /usr/local/bin/oopzbot-entrypoint
 
 RUN pip install --no-cache-dir ".[jm,legacy]" \
     && npm ci --omit=dev --prefix tools/qqbot-uploader \
     && groupadd --system oopzbot \
     && useradd --system --gid oopzbot --home-dir /app oopzbot \
     && mkdir -p /app/data \
-    && chown -R oopzbot:oopzbot /app
-
-USER oopzbot
+    && chown -R oopzbot:oopzbot /app \
+    && chmod 0755 /usr/local/bin/oopzbot-entrypoint
 
 VOLUME ["/app/data"]
+ENTRYPOINT ["/usr/local/bin/oopzbot-entrypoint"]
 CMD ["oopzbot", "start"]

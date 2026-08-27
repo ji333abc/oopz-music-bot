@@ -55,6 +55,12 @@ services:
       BOT_REDIS_PASSWORD: ""
       BOT_CHROMIUM_EXECUTABLE_PATH: /usr/bin/chromium
       BOT_CHROMEDRIVER_PATH: /usr/bin/chromedriver
+      # These secrets belong only to the panel container.  Keep the broad
+      # compatibility env_file for legacy options, but explicitly remove them
+      # from the bot process.
+      OOPZ_PANEL_PASSWORD: ""
+      RACKNERD_API_KEY: ""
+      RACKNERD_API_HASH: ""
     depends_on:
       qqmusic:
         condition: service_healthy
@@ -67,6 +73,8 @@ services:
     healthcheck:
       test:
         - CMD
+        - gosu
+        - oopzbot
         - python
         - -c
         - "import os,urllib.request; port=os.getenv('OOPZBOT_BRIDGE_PORT','18080'); urllib.request.urlopen(f'http://127.0.0.1:{port}/healthz',timeout=3).read()"

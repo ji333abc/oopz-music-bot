@@ -72,6 +72,12 @@ class _FakeMusic:
         return f"https://audio.invalid/{song_id}.mp3"
 
 
+class _UnplayableMusic(_FakeMusic):
+    def get_song_url(self, song_id: str):
+        del song_id
+        return None
+
+
 def _settings() -> Settings:
     return Settings(
         qqbot_app_id="app",
@@ -167,6 +173,15 @@ class MusicControllerTests(unittest.TestCase):
 
         self.assertEqual(result["code"], "success")
         self.assertEqual(self.runtime.played, ["https://audio.invalid/first.mp3"])
+
+    def test_unplayable_song_returns_structured_error(self) -> None:
+        self.controller.platforms["qq"] = _UnplayableMusic()
+
+        result = self.controller.play_song("first", "qq", "text", "area", "user")
+
+        self.assertEqual(result["code"], "error")
+        self.assertEqual(result["message"], "无法获取歌曲播放地址")
+        self.assertEqual(self.runtime.played, [])
 
     def test_play_request_does_not_wait_for_voice_startup(self) -> None:
         self.runtime.play_gate = threading.Event()

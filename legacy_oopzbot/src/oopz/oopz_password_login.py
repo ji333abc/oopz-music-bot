@@ -982,20 +982,26 @@ def _save_config(credentials: dict[str, Any]) -> str:
     if not values.get("device_id") or not values.get("person_uid") or not values.get("jwt_token"):
         raise OopzPasswordLoginError("登录结果缺少 OOPZ 核心凭据")
     LEGACY_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    LEGACY_DATA_DIR.chmod(0o700)
     temporary = Path(CONFIG_PATH + ".tmp")
     temporary.write_text(
         json.dumps(values, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    temporary.chmod(0o600)
     temporary.replace(CONFIG_PATH)
+    Path(CONFIG_PATH).chmod(0o600)
     return os.path.basename(CONFIG_PATH)
 
 
 def _save_private_key(pem: str) -> str:
     LEGACY_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    LEGACY_DATA_DIR.chmod(0o700)
     temporary = Path(PRIVATE_KEY_PATH + ".tmp")
     temporary.write_text(pem.strip() + "\n", encoding="utf-8")
+    temporary.chmod(0o600)
     temporary.replace(PRIVATE_KEY_PATH)
+    Path(PRIVATE_KEY_PATH).chmod(0o600)
     return os.path.basename(PRIVATE_KEY_PATH)
 
 

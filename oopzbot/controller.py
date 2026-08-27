@@ -208,7 +208,16 @@ class MusicController:
 
     def play_song_choice(self, song: dict, channel: str, area: str, user: str) -> dict:
         platform = str(song.get("platform") or "qq")
-        data = self._resolve_playable(song, platform, channel, area, user)
+        try:
+            data = self._resolve_playable(song, platform, channel, area, user)
+        except (KeyError, RuntimeError) as exc:
+            message = str(exc) or "无法获取歌曲播放地址"
+            self.notify_message(
+                text=f"错误: {message}",
+                channel=channel,
+                area=area,
+            )
+            return {"code": "error", "message": message}
         result = self._commit_song_request(data, prefix="已点歌")
         self.notify_message(
             text=result["message"],

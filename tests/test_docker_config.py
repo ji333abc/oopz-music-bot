@@ -43,6 +43,19 @@ class DockerConfigurationTests(unittest.TestCase):
         self.assertIn("OOPZ_LEGACY_SOURCE_ROOT: /app/legacy_oopzbot", compose)
         self.assertIn("OOPZ_LEGACY_SOURCE_ROOT=/app/legacy_oopzbot", dockerfile)
 
+    def test_bot_entrypoint_repairs_bind_mount_permissions_before_dropping_root(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
+        compose = (root / "compose.yaml").read_text(encoding="utf-8")
+        entrypoint = (root / "docker-entrypoint.sh").read_text(encoding="utf-8")
+
+        self.assertIn("gosu", dockerfile)
+        self.assertIn('ENTRYPOINT ["/usr/local/bin/oopzbot-entrypoint"]', dockerfile)
+        self.assertIn("chown -R oopzbot:oopzbot /app/data", entrypoint)
+        self.assertIn("export HOME=/app", entrypoint)
+        self.assertIn('exec gosu oopzbot "$@"', entrypoint)
+        self.assertIn("- gosu\n        - oopzbot\n        - python", compose)
+
 
 if __name__ == "__main__":
     unittest.main()

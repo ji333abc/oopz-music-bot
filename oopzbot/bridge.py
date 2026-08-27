@@ -140,6 +140,21 @@ def _notify_music(music, *, text: str, channel: str, area: str, **kwargs) -> boo
     return True
 
 
+def _music_action_error(result, default: str = "音乐操作未返回执行结果") -> str:
+    """Normalize the result contract shared by the current and legacy cores."""
+    if not isinstance(result, dict):
+        return default
+    if result.get("ok") is False or str(result.get("code") or "").lower() in {
+        "error",
+        "failed",
+        "failure",
+    }:
+        return str(result.get("message") or result.get("error") or default)
+    if result.get("error"):
+        return str(result.get("error"))
+    return ""
+
+
 def _rank_catalog() -> dict:
     lines = ["QQ音乐排行榜"]
     for rank_id, title in _QQ_RANKS:
@@ -309,8 +324,10 @@ def _select_rank_song(
             detail = result.get("error") if isinstance(result, dict) else "unknown"
             return {"ok": False, "message": f"进入 Oopz 语音频道失败: {detail}"}
 
+    play_result = music.play_song_choice(song, text_channel, area, bot_user)
+    if error := _music_action_error(play_result, "榜单歌曲未能开始播放或加入队列"):
+        return {"ok": False, "message": error}
     _rank_sessions.pop(requester_key, None)
-    music.play_song_choice(song, text_channel, area, bot_user)
     return {
         "ok": True,
         "reply_type": "song_selected",
@@ -1011,8 +1028,10 @@ def _select_song(
             return {"ok": False, "message": f"进入 Oopz 语音频道失败: {detail}"}
 
     song = songs[index - 1]
+    play_result = music.play_song_choice(song, text_channel, area, bot_user)
+    if error := _music_action_error(play_result, "歌曲未能开始播放或加入队列"):
+        return {"ok": False, "message": error}
     _search_sessions.pop(requester_key, None)
-    music.play_song_choice(song, text_channel, area, bot_user)
     return {
         "ok": True,
         "reply_type": "song_selected",
@@ -1148,8 +1167,22 @@ def _execute_command(command: str, requester_key: str) -> dict:
                         "message": f"进入 Oopz 语音频道失败: {result['error']}",
                     }
 
-            music.play_song(keyword, "qq", text_channel, area, bot_user)
-            return {"ok": True, "message": f"已提交点歌：{keyword}"}
+            play_result = music.play_song(
+                keyword,
+                "qq",
+                text_channel,
+                area,
+                bot_user,
+            )
+            if error := _music_action_error(
+                play_result,
+                "歌曲未能开始播放或加入队列",
+            ):
+                return {"ok": False, "message": error}
+            return {
+                "ok": True,
+                "message": str(play_result.get("message") or f"已提交点歌：{keyword}"),
+            }
 
         if command in {"下一首", "切歌", "跳过", "下一个"}:
             music.play_next(text_channel, area, bot_user)

@@ -460,6 +460,15 @@ class MusicHandler(PlaybackMixin):
         """搜索网易云并播放或加入队列"""
         self.play_song(keyword, "netease", channel, area, user)
 
+    def notify_message(self, *, text: str, channel: str, area: str, **kwargs) -> bool:
+        """Send a best-effort text notification without undoing playback."""
+        try:
+            self.sender.send_message(text=text, channel=channel, area=area, **kwargs)
+        except Exception as exc:
+            logger.warning("OOPZ 文字消息发送失败，保留音乐操作结果: %s", exc)
+            return False
+        return True
+
     def search_candidates(self, keyword: str, platform: str = _PLATFORM_NETEASE, limit: int = 5) -> list[dict]:
         """返回歌曲候选列表，用于交互式选择。"""
         resolved_platform = platform or _PLATFORM_NETEASE
@@ -527,17 +536,19 @@ class MusicHandler(PlaybackMixin):
             "user": user,
         }
 
-    def play_song_choice(self, song: dict, channel: str, area: str, user: str) -> None:
+    def play_song_choice(self, song: dict, channel: str, area: str, user: str) -> dict:
         """播放用户从候选列表中选中的歌曲。"""
         platform = song.get("platform") or _PLATFORM_NETEASE
         p = self.platforms.get(platform)
         if not p:
-            self.sender.send_message(f"错误: 未知或未启用的音乐平台: {platform}", channel=channel, area=area)
-            return
+            message = f"未知或未启用的音乐平台: {platform}"
+            self.notify_message(text=f"错误: {message}", channel=channel, area=area)
+            return {"code": "error", "message": message}
         song_id = song.get("id") or song.get("song_id") or song.get("mid")
         if not song_id:
-            self.sender.send_message("错误: 无法识别歌曲 ID", channel=channel, area=area)
-            return
+            message = "无法识别歌曲 ID"
+            self.notify_message(text=f"错误: {message}", channel=channel, area=area)
+            return {"code": "error", "message": message}
 
         data = None
         if song.get("url"):
@@ -553,50 +564,80 @@ class MusicHandler(PlaybackMixin):
                 url = p.get_song_url(song_id)
             if not url:
                 detail = getattr(p, "last_song_url_error", "") or "无法获取播放链接"
-                self.sender.send_message(f"错误: {detail}", channel=channel, area=area)
-                return
+                self.notify_message(text=f"错误: {detail}", channel=channel, area=area)
+                return {"code": "error", "message": detail}
             data = dict(song)
             data["url"] = url
         else:
             result = p.summarize_by_id(song_id)
             if result["code"] != "success":
-                self.sender.send_message(f"错误: {result['message']}", channel=channel, area=area)
-                return
+                self.notify_message(
+                    text=f"错误: {result['message']}",
+                    channel=channel,
+                    area=area,
+                )
+                return {"code": "error", "message": result["message"]}
             data = result["data"]
 
         song_data = self._build_song_data_from_platform_data(data, platform, song_id, channel, area, user)
         self._kickoff_cover_prefetch(song_data)
         if not self._check_and_enter_voice_channel(user, channel, area):
-            return
+            return {"code": "error", "message": "进入 OOPZ 语音频道失败"}
         user_name = self.names.user(user) if user else "未知用户"
         result = self._commit_song_request(song_data, prefix=f"{user_name} 从搜歌结果中选择了")
-        self.sender.send_message(text=result["message"], attachments=result.get("attachments", []), channel=channel, area=area)
+        self.notify_message(
+            text=result["message"],
+            attachments=result.get("attachments", []),
+            channel=channel,
+            area=area,
+        )
+        return result
 
-    def play_song(self, keyword: str, platform: str, channel: str, area: str, user: str) -> None:
+    def play_song(self, keyword: str, platform: str, channel: str, area: str, user: str) -> dict:
         """通用的多平台点歌入口。"""
         voice_ok = [None]
+        voice_error = [None]
         voice_done = threading.Event()
 
         def _voice_check():
-            voice_ok[0] = self._check_and_enter_voice_channel(user, channel, area)
-            voice_done.set()
+            try:
+                voice_ok[0] = self._check_and_enter_voice_channel(user, channel, area)
+            except Exception as exc:
+                voice_error[0] = exc
+            finally:
+                voice_done.set()
 
         threading.Thread(target=_voice_check, daemon=True).start()
 
         result = self._prepare_song_request(keyword, channel, area, user, platform=platform)
         if result["code"] != "success":
-            self.sender.send_message(f"错误: {result['message']}", channel=channel, area=area)
-            return
+            self.notify_message(
+                text=f"错误: {result['message']}",
+                channel=channel,
+                area=area,
+            )
+            return {"code": "error", "message": result["message"]}
 
-        voice_done.wait()
+        voice_timeout = max(1.0, float(OOPZ_CONFIG.get("agora_init_timeout") or 180))
+        if not voice_done.wait(timeout=voice_timeout):
+            return {"code": "error", "message": "进入 OOPZ 语音频道超时"}
+        if voice_error[0] is not None:
+            logger.warning("进入 OOPZ 语音频道异常: %s", voice_error[0])
+            return {"code": "error", "message": "进入 OOPZ 语音频道失败"}
         if not voice_ok[0]:
-            return
+            return {"code": "error", "message": "进入 OOPZ 语音频道失败"}
 
         result = self._commit_song_request(result["song_data"])
 
         text = result["message"]
         attachments = result.get("attachments", [])
-        self.sender.send_message(text=text, attachments=attachments, channel=channel, area=area)
+        self.notify_message(
+            text=text,
+            attachments=attachments,
+            channel=channel,
+            area=area,
+        )
+        return result
 
     def play_next(self, channel: str, area: str, user: str) -> None:
         """播放队列中的下一首"""

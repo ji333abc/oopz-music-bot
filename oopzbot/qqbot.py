@@ -21,6 +21,7 @@ import requests
 from botpy.message import GroupMessage
 
 from .operations import operations
+from .process_env import minimal_child_environment
 
 logging.basicConfig(
     level=logging.INFO,
@@ -164,13 +165,31 @@ def _parse_jm_album_ids(command: str) -> list[str]:
     return list(dict.fromkeys(re.findall(r"\d{1,12}", match.group(1))))
 
 
+def _jm_worker_environment(password: str = "") -> dict[str, str]:
+    environment = minimal_child_environment(("QQBOT_JM_MAX_BYTES",))
+    if password:
+        environment["JM_ZIP_PASSWORD"] = password
+    return environment
+
+
+def _jm_uploader_environment() -> dict[str, str]:
+    return minimal_child_environment(
+        (
+            "QQBOT_APP_ID",
+            "QQBOT_APP_SECRET",
+            "QQBOT_JM_MAX_BYTES",
+            "QQBOT_JM_TEMP_ROOT",
+        )
+    )
+
+
 def _inspect_jm_album(album_id: str) -> int:
     result = subprocess.run(
         [JM_PYTHON, JM_WORKER, "--inspect", album_id],
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
-        env=os.environ.copy(),
+        env=_jm_worker_environment(),
         timeout=JM_INSPECT_TIMEOUT_SECONDS,
         check=False,
     )
@@ -293,8 +312,7 @@ def _record_jm_timing(sample: dict) -> None:
 def _run_jm_download(album_id: str, password: str, job_dir: Path) -> tuple[Path, dict]:
     job_dir.mkdir(parents=True, exist_ok=False)
     log_path = job_dir / "download.log"
-    environment = os.environ.copy()
-    environment["JM_ZIP_PASSWORD"] = password
+    environment = _jm_worker_environment(password)
 
     with log_path.open("w", encoding="utf-8") as log_file:
         result = subprocess.run(
@@ -365,7 +383,7 @@ async def _run_jm_upload(
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env=os.environ.copy(),
+        env=_jm_uploader_environment(),
     )
     assert process.stdout is not None
     assert process.stderr is not None
