@@ -1461,10 +1461,6 @@ class OopzQQClient(botpy.Client):
                 timeout=COMMAND_DEFER_SECONDS,
             )
         except TimeoutError:
-            try:
-                await self._reply(message, "正在处理，请稍候……")
-            except Exception:
-                logger.exception("发送 QQ 群处理中提示失败，命令继续执行")
             delivery_task = asyncio.create_task(
                 self._deliver_deferred_command(
                     message,

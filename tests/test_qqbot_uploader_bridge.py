@@ -143,7 +143,7 @@ class GroupReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(api.calls[1]["msg_id"], "message-1")
         self.assertNotEqual(api.calls[0]["msg_seq"], api.calls[1]["msg_seq"])
 
-    async def test_slow_bridge_acknowledges_then_sends_passive_result(self) -> None:
+    async def test_slow_bridge_only_sends_final_passive_result(self) -> None:
         api = _FakeGroupAPI()
         message = _FakeGroupMessage(
             api,
@@ -162,16 +162,13 @@ class GroupReplyTests(unittest.IsolatedAsyncioTestCase):
         ):
             await client.on_group_at_message_create(message)
             for _ in range(50):
-                if len(api.calls) >= 2:
+                if api.calls:
                     break
                 await __import__("asyncio").sleep(0.01)
 
-        self.assertGreaterEqual(len(api.calls), 2)
-        self.assertEqual(api.calls[0]["content"], "正在处理，请稍候……")
+        self.assertEqual(len(api.calls), 1)
+        self.assertEqual(api.calls[0]["content"], "已点歌：测试歌曲")
         self.assertEqual(api.calls[0]["msg_id"], message.id)
-        self.assertEqual(api.calls[1]["content"], "已点歌：测试歌曲")
-        self.assertEqual(api.calls[1]["msg_id"], message.id)
-        self.assertNotEqual(api.calls[0]["msg_seq"], api.calls[1]["msg_seq"])
 
 
 class JMCommandParserTests(unittest.TestCase):
