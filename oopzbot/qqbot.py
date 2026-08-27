@@ -104,6 +104,9 @@ _jm_tasks: set[asyncio.Task] = set()
 _command_tasks: set[asyncio.Task] = set()
 _msg_seq_lock = Lock()
 _msg_seq = secrets.randbelow(65535)
+_OOPZ_INLINE_IMAGE_RE = re.compile(
+    r"(?m)^[ \t]*!\[IMAGEw\d+h\d+\]\([^\r\n]*\)[ \t]*(?:\r?\n|$)"
+)
 
 
 def _next_msg_seq() -> int:
@@ -112,6 +115,11 @@ def _next_msg_seq() -> int:
     with _msg_seq_lock:
         _msg_seq = (_msg_seq % 65535) + 1
         return _msg_seq
+
+
+def _qq_plain_text(content: str) -> str:
+    """Remove OOPZ-only inline attachment markers from QQ text replies."""
+    return _OOPZ_INLINE_IMAGE_RE.sub("", str(content or "")).strip()
 
 
 def _passive_reply_unavailable(error: Exception) -> bool:
@@ -553,10 +561,11 @@ class OopzQQClient(botpy.Client):
         *,
         proactive: bool = False,
     ) -> None:
+        plain_content = _qq_plain_text(content) or "命令已处理"
         payload = {
             "msg_type": 0,
             **self._reply_identity(message, msg_seq, proactive=proactive),
-            "content": content[:1000],
+            "content": plain_content[:1000],
         }
         await self._post_group_message(message, payload)
 
@@ -825,7 +834,6 @@ class OopzQQClient(botpy.Client):
         artists = str(song.get("artists") or "未知歌手")
         album = str(song.get("album") or "未知专辑")
         duration = str(song.get("duration") or "未知")
-        cover = str(song.get("cover") or "").strip()
         markdown = (
             "## 已选择歌曲\n"
             f"**{name}**\n\n"
@@ -838,26 +846,6 @@ class OopzQQClient(botpy.Client):
             f"专辑：{album}\n"
             f"时长：{duration}"
         )
-
-        if cover:
-            try:
-                media = await message._api.post_group_file(
-                    group_openid=message.group_openid,
-                    file_type=1,
-                    url=cover,
-                )
-                await self._post_group_message(
-                    message,
-                    {
-                        "msg_type": 1,
-                        **self._reply_identity(message, proactive=proactive),
-                        "content": fallback,
-                        "media": media,
-                    },
-                )
-                return
-            except Exception as exc:
-                logger.warning("QQ 图文混排发送失败，退回单条文字消息: %s", exc)
 
         try:
             await self._post_group_message(

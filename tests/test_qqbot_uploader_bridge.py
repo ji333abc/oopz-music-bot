@@ -31,6 +31,7 @@ class _FakeGroupAPI:
     def __init__(self, first_error: Exception | None = None) -> None:
         self.first_error = first_error
         self.calls: list[dict] = []
+        self.file_calls: list[dict] = []
 
     async def post_group_message(self, **payload) -> None:
         self.calls.append(payload)
@@ -38,6 +39,10 @@ class _FakeGroupAPI:
             error = self.first_error
             self.first_error = None
             raise error
+
+    async def post_group_file(self, **payload) -> dict:
+        self.file_calls.append(payload)
+        return {"file_info": "unused"}
 
 
 class _FakeGroupMessage:
@@ -60,6 +65,43 @@ class _FakeGroupMessage:
 
 
 class GroupReplyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_oopz_inline_cover_marker_is_removed_from_qq_text(self) -> None:
+        api = _FakeGroupAPI()
+        message = _FakeGroupMessage(api)
+        client = object.__new__(service.OopzQQClient)
+
+        await client._reply(
+            message,
+            "![IMAGEw300h300](/im/cover.jpeg)\nMusic-bot 点播了:\n歌曲: 半壶纱",
+        )
+
+        self.assertEqual(
+            api.calls[0]["content"],
+            "Music-bot 点播了:\n歌曲: 半壶纱",
+        )
+
+    async def test_selected_song_reply_does_not_upload_cover_to_qq(self) -> None:
+        api = _FakeGroupAPI()
+        message = _FakeGroupMessage(api)
+        client = object.__new__(service.OopzQQClient)
+
+        await client._reply_song_selected(
+            message,
+            {
+                "song": {
+                    "name": "半壶纱",
+                    "artists": "刘珂矣",
+                    "album": "半壶纱",
+                    "duration": "3:41",
+                    "cover": "https://example.invalid/cover.jpg",
+                }
+            },
+        )
+
+        self.assertEqual(api.file_calls, [])
+        self.assertEqual(api.calls[0]["msg_type"], 2)
+        self.assertNotIn("media", api.calls[0])
+
     async def test_expired_reply_falls_back_to_active_group_message(self) -> None:
         api = _FakeGroupAPI(RuntimeError("msgid已经过期,不能回复"))
         message = _FakeGroupMessage(api)
