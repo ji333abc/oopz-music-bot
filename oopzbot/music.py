@@ -174,11 +174,10 @@ class QQMusic:
             if url:
                 return url
 
-        # 最后兼容不支持新版接口的旧服务。
-        data = self._get("/song/url", params={"id": song_id})
-        url = self._extract_play_url(data or {}, song_id)
-
-        return url or None
+        # The managed Rain120 service only exposes /getMusicPlay.  Do not
+        # probe the obsolete /song/url route: it returns 404 for every song
+        # and obscures the real reason when QQ marks a track unplayable.
+        return None
 
     def get_fallback_song_url(self, song_id) -> str | None:
         """获取 Python 本地下载使用的低码率备用链接。"""
