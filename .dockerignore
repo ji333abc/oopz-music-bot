@@ -12,6 +12,8 @@ wheelhouse
 *.egg-info
 data
 deploy-packages
+/jm-qqbot
+/panel
 oopz-selfhost-update-*.tar.gz
 tests
 docs

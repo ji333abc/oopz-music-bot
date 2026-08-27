@@ -7,6 +7,7 @@ import {
   classifyError,
   isRetryable,
   parseArgs,
+  sendFileWithFallback,
   uploadWithRetry,
   validateFile,
 } from "./uploader.mjs";
@@ -33,6 +34,8 @@ test("classifyError separates permanent and transient errors", () => {
   assert.equal(classifyError(new RangeError("too large")), "size");
   assert.equal(classifyError(new Error("request timeout")), "timeout");
   assert.equal(classifyError(new Error("fetch failed ECONNRESET")), "network");
+  assert.equal(classifyError(new Error("msgid已经过期,不能回复")), "expired");
+  assert.equal(classifyError(new Error("消息被去重，请检查请求msgseq")), "expired");
   assert.equal(classifyError(new Error("缺少 QQBOT_APP_SECRET")), "auth");
   assert.equal(classifyError(new Error("unknown response")), "api");
   assert.equal(isRetryable("network"), true);
@@ -97,4 +100,32 @@ test("uploadWithRetry does not retry permanent failures", async () => {
   };
   await assert.rejects(() => uploadWithRetry(bot, {}, {}, {}, 0));
   assert.equal(calls, 1);
+});
+
+test("sendFileWithFallback retries an expired passive reply as proactive", async () => {
+  const targets = [];
+  const bot = {
+    async sendFile(target) {
+      targets.push(target);
+      if (targets.length === 1) {
+        const error = new Error("msgid已经过期,不能回复");
+        error.bizCode = 40034031;
+        throw error;
+      }
+      return { upload: { file_uuid: "uuid", ttl: 60 } };
+    },
+  };
+
+  const result = await sendFileWithFallback(
+    bot,
+    { scope: "group", targetId: "group", msgId: "message" },
+    { localPath: "/tmp/file.zip" },
+    {},
+    0,
+  );
+
+  assert.equal(result.upload.file_uuid, "uuid");
+  assert.equal(targets.length, 2);
+  assert.equal(targets[0].msgId, "message");
+  assert.equal("msgId" in targets[1], false);
 });

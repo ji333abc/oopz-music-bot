@@ -20,6 +20,8 @@ import botpy
 import requests
 from botpy.message import GroupMessage
 
+from .operations import operations
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
@@ -31,12 +33,13 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 APP_ID = (os.getenv("QQBOT_APP_ID") or "").strip()
 APP_SECRET = (os.getenv("QQBOT_APP_SECRET") or "").strip()
 BRIDGE_TOKEN = (os.getenv("QQBOT_BRIDGE_TOKEN") or "").strip()
+_bridge_host = os.getenv("OOPZBOT_BRIDGE_HOST", "127.0.0.1")
+if _bridge_host in {"0.0.0.0", "::"}:
+    _bridge_host = "127.0.0.1"
 BRIDGE_URL = (
     os.getenv("QQBOT_BRIDGE_URL")
-    or (
-        f"http://{os.getenv('OOPZBOT_BRIDGE_HOST', '127.0.0.1')}:"
-        f"{os.getenv('OOPZBOT_BRIDGE_PORT', '18080')}/internal/qqbot/command"
-    )
+    or f"http://{_bridge_host}:{os.getenv('OOPZBOT_BRIDGE_PORT', '18080')}"
+    "/internal/qqbot/command"
 ).strip()
 FILE_TEST_URL = (os.getenv("QQBOT_FILE_TEST_URL") or "").strip()
 JM_ENABLED = (os.getenv("QQBOT_JM_ENABLED") or "").strip().lower() in {
@@ -97,6 +100,26 @@ _seen_lock = Lock()
 _jm_job_lock = Lock()
 _jm_timing_lock = Lock()
 _jm_tasks: set[asyncio.Task] = set()
+
+
+def _passive_reply_unavailable(error: Exception) -> bool:
+    normalized = str(error).replace(" ", "").lower()
+    if "40034031" in normalized:
+        return True
+    if "msgid" in normalized and any(
+        marker in normalized
+        for marker in ("过期", "失效", "expired", "invalid", "replylimit")
+    ):
+        return True
+    return any(
+        marker in normalized
+        for marker in (
+            "消息id已失效",
+            "消息被去重",
+            "回复次数已达上限",
+            "超过回复次数",
+        )
+    )
 
 
 def _parse_jm_album_ids(command: str) -> list[str]:
@@ -419,10 +442,33 @@ def _forward_command(
 class OopzQQClient(botpy.Client):
     async def on_ready(self):
         logger.info("QQ 机器人已上线: %s", self.robot.name)
+        operations.set_component("qq_bot", "online", "QQ 网关已连接")
+        operations.record_event("gateway", "QQ 机器人已上线", source="QQ Bot")
         if not ALLOWED_GROUPS:
             logger.warning(
                 "尚未设置 QQBOT_ALLOWED_GROUP_OPENIDS；当前会接受机器人所在群的命令"
             )
+
+    async def _post_group_message(
+        self,
+        message: GroupMessage,
+        payload: dict,
+    ) -> None:
+        request = {"group_openid": message.group_openid, **payload}
+        try:
+            await message._api.post_group_message(**request)
+        except Exception as exc:
+            if "msg_id" not in request or not _passive_reply_unavailable(exc):
+                raise
+
+            logger.warning(
+                "被动回复不可用，改为主动群消息发送: group_openid=%s error=%s",
+                message.group_openid,
+                str(exc).replace("\n", " ")[-300:],
+            )
+            request.pop("msg_id", None)
+            request.pop("msg_seq", None)
+            await message._api.post_group_message(**request)
 
     async def _reply(
         self,
@@ -431,28 +477,12 @@ class OopzQQClient(botpy.Client):
         msg_seq: int = 1,
     ) -> None:
         payload = {
-            "group_openid": message.group_openid,
             "msg_type": 0,
             "msg_id": message.id,
             "msg_seq": msg_seq,
             "content": content[:1000],
         }
-        try:
-            await message._api.post_group_message(**payload)
-        except Exception as exc:
-            error_text = str(exc).replace(" ", "").lower()
-            if "msgid已经过期" not in error_text and not (
-                "msgid" in error_text and "过期" in error_text
-            ):
-                raise
-
-            logger.warning(
-                "被动回复消息已过期，改为主动群消息发送: group_openid=%s",
-                message.group_openid,
-            )
-            payload.pop("msg_id", None)
-            payload.pop("msg_seq", None)
-            await message._api.post_group_message(**payload)
+        await self._post_group_message(message, payload)
 
     @staticmethod
     def _search_markdown(result: dict) -> str:
@@ -501,6 +531,50 @@ class OopzQQClient(botpy.Client):
             for offset in range(0, len(buttons), 2)
         ]
         return {"content": {"rows": rows}}
+
+    @staticmethod
+    def _queue_markdown(result: dict) -> str:
+        current = result.get("current") or {}
+        items = result.get("queue_items") or []
+        total = int(result.get("queue_length") or 0)
+        lines = ["# Oopz 播放队列", ""]
+        notice = str(result.get("notice") or "").strip()
+        if notice:
+            lines.extend([f"> {notice}", ""])
+        if current:
+            lines.append(
+                f"正在播放：**{current.get('name', '未知歌曲')}** — "
+                f"{current.get('artists', '未知歌手')}"
+            )
+        else:
+            lines.append("正在播放：无")
+        lines.extend(["", f"待播队列：{total} 首"])
+        for item in items:
+            lines.append(
+                f"{item.get('index', 0)}. **{item.get('name', '未知歌曲')}** — "
+                f"{item.get('artists', '未知歌手')}"
+            )
+        if total > len(items):
+            lines.append(f"……另有 {total - len(items)} 首")
+        if items:
+            lines.extend(["", "> 点击下方按钮删除对应待播歌曲"])
+        return "\n".join(lines)
+
+    def _queue_keyboard(self, result: dict, requester_id: str) -> dict:
+        items = [
+            {
+                "value": str(item.get("index") or ""),
+                "label": f"删 {item.get('index', '')}. {item.get('name', '未知歌曲')}",
+                "command": f"删除 {item.get('index', '')}",
+            }
+            for item in (result.get("queue_items") or [])
+        ]
+        return self._command_keyboard(
+            items,
+            requester_id,
+            "删除",
+            buttons_per_row=2,
+        )
 
     @staticmethod
     def _command_keyboard(
@@ -565,17 +639,19 @@ class OopzQQClient(botpy.Client):
             for rank in (result.get("button_ranks") or ranks[:6])
         ]
         try:
-            await message._api.post_group_message(
-                group_openid=message.group_openid,
-                msg_type=2,
-                msg_id=message.id,
-                msg_seq=1,
-                markdown={"content": "\n".join(lines)},
-                keyboard=self._command_keyboard(
-                    items,
-                    requester_id,
-                    "榜单",
-                ),
+            await self._post_group_message(
+                message,
+                {
+                    "msg_type": 2,
+                    "msg_id": message.id,
+                    "msg_seq": 1,
+                    "markdown": {"content": "\n".join(lines)},
+                    "keyboard": self._command_keyboard(
+                        items,
+                        requester_id,
+                        "榜单",
+                    ),
+                },
             )
         except Exception as exc:
             logger.warning("QQ 排行榜菜单发送失败，退回纯文本: %s", exc)
@@ -606,18 +682,20 @@ class OopzQQClient(botpy.Client):
         )
         lines.extend(["", "> 可单首点歌，也可将前10首批量加入队列"])
         try:
-            await message._api.post_group_message(
-                group_openid=message.group_openid,
-                msg_type=2,
-                msg_id=message.id,
-                msg_seq=1,
-                markdown={"content": "\n".join(lines)},
-                keyboard=self._command_keyboard(
-                    items,
-                    requester_id,
-                    "榜单点歌",
-                    buttons_per_row=3,
-                ),
+            await self._post_group_message(
+                message,
+                {
+                    "msg_type": 2,
+                    "msg_id": message.id,
+                    "msg_seq": 1,
+                    "markdown": {"content": "\n".join(lines)},
+                    "keyboard": self._command_keyboard(
+                        items,
+                        requester_id,
+                        "榜单点歌",
+                        buttons_per_row=3,
+                    ),
+                },
             )
         except Exception as exc:
             logger.warning("QQ 排行榜详情发送失败，退回纯文本: %s", exc)
@@ -630,13 +708,15 @@ class OopzQQClient(botpy.Client):
         requester_id: str,
     ) -> None:
         try:
-            await message._api.post_group_message(
-                group_openid=message.group_openid,
-                msg_type=2,
-                msg_id=message.id,
-                msg_seq=1,
-                markdown={"content": self._search_markdown(result)},
-                keyboard=self._search_keyboard(result, requester_id),
+            await self._post_group_message(
+                message,
+                {
+                    "msg_type": 2,
+                    "msg_id": message.id,
+                    "msg_seq": 1,
+                    "markdown": {"content": self._search_markdown(result)},
+                    "keyboard": self._search_keyboard(result, requester_id),
+                },
             )
         except Exception as exc:
             logger.warning("QQ Markdown/选歌按钮发送失败，退回纯文本: %s", exc)
@@ -676,29 +756,54 @@ class OopzQQClient(botpy.Client):
                     file_type=1,
                     url=cover,
                 )
-                await message._api.post_group_message(
-                    group_openid=message.group_openid,
-                    msg_type=1,
-                    msg_id=message.id,
-                    msg_seq=1,
-                    content=fallback,
-                    media=media,
+                await self._post_group_message(
+                    message,
+                    {
+                        "msg_type": 1,
+                        "msg_id": message.id,
+                        "msg_seq": 1,
+                        "content": fallback,
+                        "media": media,
+                    },
                 )
                 return
             except Exception as exc:
                 logger.warning("QQ 图文混排发送失败，退回单条文字消息: %s", exc)
 
         try:
-            await message._api.post_group_message(
-                group_openid=message.group_openid,
-                msg_type=2,
-                msg_id=message.id,
-                msg_seq=1,
-                markdown={"content": markdown},
+            await self._post_group_message(
+                message,
+                {
+                    "msg_type": 2,
+                    "msg_id": message.id,
+                    "msg_seq": 1,
+                    "markdown": {"content": markdown},
+                },
             )
         except Exception as exc:
             logger.warning("QQ Markdown 歌曲信息发送失败，退回纯文本: %s", exc)
             await self._reply(message, fallback, msg_seq=1)
+
+    async def _reply_queue_panel(
+        self,
+        message: GroupMessage,
+        result: dict,
+        requester_id: str,
+    ) -> None:
+        items = result.get("queue_items") or []
+        try:
+            payload = {
+                "msg_type": 2,
+                "msg_id": message.id,
+                "msg_seq": 1,
+                "markdown": {"content": self._queue_markdown(result)},
+            }
+            if items:
+                payload["keyboard"] = self._queue_keyboard(result, requester_id)
+            await self._post_group_message(message, payload)
+        except Exception as exc:
+            logger.warning("QQ 队列面板发送失败，退回纯文本: %s", exc)
+            await self._reply(message, str(result.get("message") or "队列为空"))
 
     async def _reply_result(
         self,
@@ -719,6 +824,9 @@ class OopzQQClient(botpy.Client):
         if reply_type == "song_selected" and result.get("song"):
             await self._reply_song_selected(message, result)
             return
+        if reply_type == "queue_panel":
+            await self._reply_queue_panel(message, result, requester_id)
+            return
         await self._reply(
             message,
             str(result.get("message") or "命令已处理"),
@@ -732,6 +840,7 @@ class OopzQQClient(botpy.Client):
         *,
         send_result: bool = True,
         release_lock: bool = True,
+        job_id: str = "",
     ) -> dict:
         job_dir = JM_TEMP_ROOT / f"jm-{album_id}-{secrets.token_hex(8)}"
         alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
@@ -741,6 +850,13 @@ class OopzQQClient(botpy.Client):
         job_started = time.monotonic()
 
         try:
+            if job_id:
+                operations.update_jm_job(
+                    job_id,
+                    status="running",
+                    phase="downloading",
+                    page_count=page_count,
+                )
             archive, download_result = await asyncio.to_thread(
                 _run_jm_download,
                 album_id,
@@ -761,6 +877,14 @@ class OopzQQClient(botpy.Client):
                 album_id,
                 archive_size,
             )
+            if job_id:
+                operations.update_jm_job(
+                    job_id,
+                    status="running",
+                    phase="uploading",
+                    archive_bytes=archive_size,
+                    page_count=page_count or int(download_result.get("page_count") or 0),
+                )
             upload_started = time.monotonic()
             await _run_jm_upload(
                 archive=archive,
@@ -820,6 +944,18 @@ class OopzQQClient(botpy.Client):
                 album_id,
                 archive_size,
             )
+            if job_id:
+                operations.update_jm_job(
+                    job_id,
+                    status="completed",
+                    phase="completed",
+                    archive_bytes=archive_size,
+                )
+            operations.record_event(
+                "jm",
+                f"JM{album_id} 上传完成",
+                source="JM 上传器",
+            )
             return {
                 "ok": True,
                 "album_id": album_id,
@@ -830,6 +966,19 @@ class OopzQQClient(botpy.Client):
         except subprocess.TimeoutExpired:
             logger.warning("JM 任务超时: album_id=%s", album_id)
             error_text = "下载超时，任务已停止"
+            if job_id:
+                operations.update_jm_job(
+                    job_id,
+                    status="timeout",
+                    phase="timeout",
+                    error=error_text,
+                )
+            operations.record_event(
+                "jm",
+                f"JM{album_id} {error_text}",
+                level="error",
+                source="JM 下载器",
+            )
             if send_result:
                 await self._reply(
                     message,
@@ -860,6 +1009,19 @@ class OopzQQClient(botpy.Client):
                 )
             else:
                 error_text = str(exc).replace("\n", " ")[-500:]
+            if job_id:
+                operations.update_jm_job(
+                    job_id,
+                    status="failed",
+                    phase="failed",
+                    error=error_text,
+                )
+            operations.record_event(
+                "jm",
+                f"JM{album_id} 失败：{error_text}",
+                level="error",
+                source="JM 任务",
+            )
             if send_result:
                 await self._reply(
                     message,
@@ -882,17 +1044,18 @@ class OopzQQClient(botpy.Client):
     async def _run_jm_batch(
         self,
         message: GroupMessage,
-        jobs: list[tuple[str, int | None]],
+        jobs: list[tuple[str, int | None, str]],
     ) -> None:
         batch_started = time.monotonic()
         try:
-            for index, (album_id, page_count) in enumerate(jobs, start=1):
+            for index, (album_id, page_count, job_id) in enumerate(jobs, start=1):
                 result = await self._run_jm_job(
                     message,
                     album_id,
                     page_count,
                     send_result=False,
                     release_lock=False,
+                    job_id=job_id,
                 )
                 if result.get("ok"):
                     lines = [
@@ -958,10 +1121,13 @@ class OopzQQClient(botpy.Client):
             await self._reply(message, "已有一个 JM 下载任务正在运行，请稍后再试")
             return
 
+        job_id = ""
         try:
+            job_id = operations.begin_jm_job(album_id, requester="QQ 群用户")
             page_count: int | None = None
             try:
                 page_count = await asyncio.to_thread(_inspect_jm_album, album_id)
+                operations.update_jm_job(job_id, page_count=page_count)
                 estimated_seconds = _estimate_jm_seconds(page_count)
                 estimate_text = (
                     f"\n页数：{page_count} 页"
@@ -978,11 +1144,18 @@ class OopzQQClient(botpy.Client):
                 msg_seq=1,
             )
             task = asyncio.create_task(
-                self._run_jm_job(message, album_id, page_count)
+                self._run_jm_job(message, album_id, page_count, job_id=job_id)
             )
             _jm_tasks.add(task)
             task.add_done_callback(_jm_tasks.discard)
-        except Exception:
+        except Exception as exc:
+            if job_id:
+                operations.update_jm_job(
+                    job_id,
+                    status="failed",
+                    phase="failed",
+                    error=f"启动任务失败：{type(exc).__name__}",
+                )
             _jm_job_lock.release()
             raise
 
@@ -1011,6 +1184,7 @@ class OopzQQClient(botpy.Client):
             await self._reply(message, "已有一个 JM 下载任务正在运行，请稍后再试")
             return
 
+        created_job_ids: list[str] = []
         try:
             async def inspect(album_id: str) -> tuple[str, int | None]:
                 for attempt in range(1, 3):
@@ -1032,19 +1206,28 @@ class OopzQQClient(botpy.Client):
                 return album_id, None
 
             # JM 元数据端点对并发请求不稳定；按输入顺序逐个查询更可靠。
-            jobs: list[tuple[str, int | None]] = []
-            for album_id in album_ids:
-                jobs.append(await inspect(album_id))
+            jobs: list[tuple[str, int | None, str]] = []
+            for index, album_id in enumerate(album_ids, start=1):
+                job_id = operations.begin_jm_job(
+                    album_id,
+                    requester="QQ 群用户",
+                    batch_index=index,
+                    batch_total=len(album_ids),
+                )
+                created_job_ids.append(job_id)
+                inspected_id, page_count = await inspect(album_id)
+                operations.update_jm_job(job_id, page_count=page_count)
+                jobs.append((inspected_id, page_count, job_id))
             estimates = [
                 _estimate_jm_seconds(page_count)
-                for _, page_count in jobs
+                for _, page_count, _ in jobs
                 if page_count
             ]
             lines = [
                 f"已开始 JM 批量任务，共 {len(jobs)} 个",
                 "将按以下顺序逐个下载并上传：",
             ]
-            for index, (album_id, page_count) in enumerate(jobs, start=1):
+            for index, (album_id, page_count, _job_id) in enumerate(jobs, start=1):
                 if page_count:
                     estimate = _estimate_jm_seconds(page_count)
                     detail = f"{page_count} 页，约 {estimate} 秒"
@@ -1060,7 +1243,14 @@ class OopzQQClient(botpy.Client):
             task = asyncio.create_task(self._run_jm_batch(message, jobs))
             _jm_tasks.add(task)
             task.add_done_callback(_jm_tasks.discard)
-        except Exception:
+        except Exception as exc:
+            for job_id in created_job_ids:
+                operations.update_jm_job(
+                    job_id,
+                    status="failed",
+                    phase="failed",
+                    error=f"启动批量任务失败：{type(exc).__name__}",
+                )
             _jm_job_lock.release()
             raise
 
@@ -1118,12 +1308,14 @@ class OopzQQClient(botpy.Client):
                     url=FILE_TEST_URL,
                     srv_send_msg=False,
                 )
-                await message._api.post_group_message(
-                    group_openid=group_openid,
-                    msg_type=7,
-                    msg_id=message.id,
-                    msg_seq=1,
-                    media=media,
+                await self._post_group_message(
+                    message,
+                    {
+                        "msg_type": 7,
+                        "msg_id": message.id,
+                        "msg_seq": 1,
+                        "media": media,
+                    },
                 )
                 logger.info("QQ 群普通文件测试发送成功: %s", FILE_TEST_URL)
             except Exception as exc:
@@ -1189,7 +1381,20 @@ def main() -> None:
 
     intents = botpy.Intents(public_messages=True)
     client = OopzQQClient(intents=intents)
-    client.run(appid=APP_ID, secret=APP_SECRET)
+    operations.set_component("qq_bot", "starting", "正在连接 QQ 网关")
+    try:
+        client.run(appid=APP_ID, secret=APP_SECRET)
+    except Exception as exc:
+        operations.set_component(
+            "qq_bot",
+            "error",
+            f"QQ 网关异常：{type(exc).__name__}",
+        )
+        raise
+    finally:
+        current = operations.snapshot().get("components", {}).get("qq_bot", {})
+        if current.get("status") != "error":
+            operations.set_component("qq_bot", "offline", "QQ 网关已停止")
 
 
 if __name__ == "__main__":

@@ -12,6 +12,8 @@ __pycache__/
 venv/
 *.egg-info/
 build/
+!panel/build/
+!panel/build/sites-vite-plugin.ts
 wheelhouse/
 
 # Node.js and frontend build output

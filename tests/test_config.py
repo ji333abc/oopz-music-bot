@@ -37,6 +37,23 @@ class SettingsTests(unittest.TestCase):
             errors = Settings.from_env().validate()
         self.assertTrue(any("回环地址" in error for error in errors))
 
+    def test_private_docker_bridge_bind_is_explicitly_allowed(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "OOPZBOT_BRIDGE_HOST": "0.0.0.0",
+                "OOPZBOT_BRIDGE_PRIVATE_NETWORK": "true",
+            },
+            clear=True,
+        ):
+            settings = Settings.from_env()
+            errors = settings.validate()
+        self.assertFalse(any("回环地址" in error for error in errors))
+        self.assertEqual(
+            settings.bridge_url,
+            "http://127.0.0.1:18080/internal/qqbot/command",
+        )
+
     def test_external_music_url_preserves_legacy_external_mode(self) -> None:
         with patch.dict(
             os.environ,

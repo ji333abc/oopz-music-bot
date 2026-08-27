@@ -49,8 +49,9 @@ class GroupReplyTests(unittest.IsolatedAsyncioTestCase):
     async def test_expired_reply_falls_back_to_active_group_message(self) -> None:
         api = _FakeGroupAPI(RuntimeError("msgid已经过期,不能回复"))
         message = _FakeGroupMessage(api)
+        client = object.__new__(service.OopzQQClient)
 
-        await service.OopzQQClient._reply(object(), message, "done", msg_seq=3)
+        await client._reply(message, "done", msg_seq=3)
 
         self.assertEqual(len(api.calls), 2)
         self.assertEqual(api.calls[0]["msg_id"], "message-1")
@@ -62,11 +63,23 @@ class GroupReplyTests(unittest.IsolatedAsyncioTestCase):
     async def test_other_reply_errors_are_not_retried(self) -> None:
         api = _FakeGroupAPI(RuntimeError("permission denied"))
         message = _FakeGroupMessage(api)
+        client = object.__new__(service.OopzQQClient)
 
         with self.assertRaisesRegex(RuntimeError, "permission denied"):
-            await service.OopzQQClient._reply(object(), message, "done")
+            await client._reply(message, "done")
 
         self.assertEqual(len(api.calls), 1)
+
+    async def test_reply_limit_falls_back_to_active_group_message(self) -> None:
+        api = _FakeGroupAPI(RuntimeError("回复次数已达上限"))
+        message = _FakeGroupMessage(api)
+        client = object.__new__(service.OopzQQClient)
+
+        await client._reply(message, "done", msg_seq=5)
+
+        self.assertEqual(len(api.calls), 2)
+        self.assertNotIn("msg_id", api.calls[1])
+        self.assertNotIn("msg_seq", api.calls[1])
 
 
 class JMCommandParserTests(unittest.TestCase):

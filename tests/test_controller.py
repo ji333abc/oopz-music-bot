@@ -94,6 +94,28 @@ class MusicQueueTests(unittest.TestCase):
         song["name"] = "changed"
         self.assertEqual(queue.peek_next()["name"], "one")
 
+    def test_remove_positions_uses_one_based_pending_indexes(self) -> None:
+        queue = MusicQueue()
+        for name in ("one", "two", "three", "four"):
+            queue.add_to_queue({"name": name})
+
+        removed = queue.remove_positions([4, 2, 2])
+
+        self.assertEqual([song["name"] for song in removed], ["two", "four"])
+        self.assertEqual(
+            [song["name"] for song in queue.get_queue()],
+            ["one", "three"],
+        )
+
+    def test_remove_positions_is_atomic_when_an_index_is_invalid(self) -> None:
+        queue = MusicQueue()
+        queue.add_to_queue({"name": "one"})
+
+        with self.assertRaises(IndexError):
+            queue.remove_positions([1, 2])
+
+        self.assertEqual([song["name"] for song in queue.get_queue()], ["one"])
+
 
 class MusicControllerTests(unittest.TestCase):
     def setUp(self) -> None:

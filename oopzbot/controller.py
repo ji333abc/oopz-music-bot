@@ -42,6 +42,29 @@ class MusicQueue:
         with self._lock:
             return dict(self._items.popleft()) if self._items else None
 
+    def remove_positions(self, positions: list[int]) -> list[dict]:
+        """Remove one-based pending queue positions atomically.
+
+        The currently playing song is intentionally not part of the numbered
+        pending queue and is never removed by this operation.
+        """
+        with self._lock:
+            normalized = sorted(set(positions))
+            if not normalized:
+                return []
+            if normalized[0] < 1 or normalized[-1] > len(self._items):
+                raise IndexError("queue position out of range")
+
+            items = list(self._items)
+            selected = set(normalized)
+            removed = [dict(items[index - 1]) for index in normalized]
+            self._items = deque(
+                item
+                for index, item in enumerate(items, 1)
+                if index not in selected
+            )
+            return removed
+
     def get_current(self) -> dict | None:
         with self._lock:
             return dict(self._current) if self._current else None

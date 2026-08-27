@@ -25,9 +25,54 @@ services:
       OOPZ_VOICE_BROWSER_EXECUTABLE_PATH: /usr/bin/chromium
       QQ_MUSIC_MANAGED: "false"
       QQ_MUSIC_BASE_URL: http://qqmusic:3200
+      OOPZBOT_BRIDGE_HOST: 0.0.0.0
+      OOPZBOT_BRIDGE_PRIVATE_NETWORK: "true"
+      OOPZBOT_PANEL_STATE_FILE: /app/data/panel-state.json
     depends_on:
       qqmusic:
         condition: service_healthy
     volumes:
       - ./data:/app/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,urllib.request; port=os.getenv('OOPZBOT_BRIDGE_PORT','18080'); urllib.request.urlopen(f'http://127.0.0.1:{port}/healthz',timeout=3).read()"
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
     init: true
+    stop_grace_period: 30s
+
+  panel:
+    build:
+      context: ./panel
+    restart: unless-stopped
+    environment:
+      OOPZBOT_BRIDGE_URL: http://bot:18080/internal/qqbot/command
+      OOPZBOT_PANEL_SNAPSHOT_URL: http://bot:18080/internal/panel/snapshot
+      QQBOT_BRIDGE_TOKEN: ${QQBOT_BRIDGE_TOKEN:?QQBOT_BRIDGE_TOKEN is required}
+      OOPZ_PANEL_PUBLIC_URL: ${OOPZ_PANEL_PUBLIC_URL:-http://localhost:3000}
+      OOPZ_PANEL_USERNAME: ${OOPZ_PANEL_USERNAME:-admin}
+      OOPZ_PANEL_PASSWORD: ${OOPZ_PANEL_PASSWORD:?OOPZ_PANEL_PASSWORD is required}
+      RACKNERD_API_KEY: ${RACKNERD_API_KEY:-}
+      RACKNERD_API_HASH: ${RACKNERD_API_HASH:-}
+    depends_on:
+      bot:
+        condition: service_healthy
+    ports:
+      - "${OOPZ_PANEL_BIND:-127.0.0.1}:${OOPZ_PANEL_PORT:-3000}:3000"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    init: true
+    stop_grace_period: 15s

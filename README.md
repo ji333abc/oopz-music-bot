@@ -1,5 +1,7 @@
 # OOPZ Music Bot
 
+> 只需要 QQ 群 JM 下载功能？已抽成独立、可直接 Docker 部署的 [JM QQ Bot](jm-qqbot/README.md)。
+
 一个可自托管的 QQ 群音乐机器人：群成员通过 `@机器人` 点歌，机器人搜索歌曲、维护队列，并把音频推送到指定的 OOPZ 语音频道。
 
 机器人通过 QQ 群命令交互，支持 Docker Compose、systemd 和本地 Python 环境部署。
@@ -12,6 +14,7 @@
 - 查询 OOPZ 语音频道及在线成员
 - 群组白名单和内部桥接鉴权
 - 可选后台归档任务和 QQ 群文件上传
+- Web 管理面板：实时状态、完整队列、搜歌和逐条删除
 - 单一 CLI、配置检查、频道发现、Docker 和 systemd 部署
 
 ## 架构
@@ -20,6 +23,7 @@
 flowchart LR
     User["QQ 群用户"] --> QQ["QQ Bot 入口"]
     QQ --> Bridge["本机命令桥接"]
+    Panel["Web 管理面板"] --> Bridge
     Bridge --> Core["音乐控制器与队列"]
     Core --> Music["QQ 音乐 HTTP 适配器"]
     Music --> API["固定版本 QQ Music API"]
@@ -27,7 +31,7 @@ flowchart LR
     SDK --> Voice["OOPZ / Agora 语音频道"]
 ```
 
-机器人、内部 API、队列和 OOPZ SDK 运行在同一个 Python 进程中。内部桥接固定监听回环地址。本地安装默认使用项目锁定版本的 `Rain120/qq-music-api`，由 Bot 自动托管；Docker Compose 将它作为内部服务运行。
+机器人、内部 API、队列和 OOPZ SDK 运行在同一个 Python 进程中。本地安装时内部桥接固定监听回环地址；Compose 模式只向私有容器网络开放并保留令牌鉴权。默认使用项目锁定版本的 `Rain120/qq-music-api`，Docker Compose 将音乐接口和 Web 面板作为独立服务运行。
 
 详细设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
@@ -50,7 +54,7 @@ docker compose up -d --build
 docker compose logs -f bot
 ```
 
-Compose 会构建固定提交的 QQ 音乐 API，并只在容器内部网络提供给 Bot。两个容器都不向主机映射端口。
+Compose 会启动 `bot`、固定版本的 `qqmusic` 和 `panel`。音乐接口和机器人桥接只在容器内部网络开放；面板默认监听宿主机 `127.0.0.1:3000`，自带 HTTP Basic Auth（启动前必须设置 `OOPZ_PANEL_PASSWORD`），适合由 Nginx/Caddy 加 HTTPS 后对外提供。
 
 ### 方式二：本地安装
 
@@ -135,8 +139,10 @@ QQ_MUSIC_BASE_URL=http://127.0.0.1:3200
 
 ```text
 点歌 <歌名>        搜索并播放或加入队列
-搜歌 <关键词>      返回候选歌曲
+搜歌 <关键词>      返回前 10 首候选歌曲
 选歌 <编号>        选择最近一次搜索结果
+面板 / 队列        显示当前播放、待播队列和删除按钮
+删除 <编号...>     删除指定待播歌曲，例如：删除 2 5
 排行榜             查看榜单
 榜单 <ID或名称>    查看榜单歌曲
 榜单点歌 <编号>    播放榜单歌曲
@@ -171,8 +177,10 @@ npm test --prefix tools/qqbot-uploader
 ## 部署
 
 - Docker：使用仓库根目录的 `compose.yaml`。
+- 从旧版 `main.py + qqbot_service.py + 独立 QQMusic API` 迁移：按 [旧版迁移到 Docker 指南](docs/MIGRATION_FROM_LEGACY.md) 执行。
+- Web 面板：默认地址 `http://127.0.0.1:3000`，自带登录保护；公网使用前必须放在 HTTPS 反向代理后。
 - Linux 原生服务：参考 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) 和 `deploy/oopzbot.service`。
-- 内部桥接只能监听 `127.0.0.1`、`localhost` 或 `::1`。
+- 内部桥接在原生部署中只能监听回环地址；Docker 私网模式由 Compose 显式启用，且不映射宿主机端口。
 - 不要把 `.env`、音乐 Cookie、QQ Secret 或 OOPZ 凭据提交到 Git。
 
 ## 许可证

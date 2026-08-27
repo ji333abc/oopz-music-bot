@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import os
 import re
 import secrets
+import shutil
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from threading import Lock
 
 import requests
@@ -15,6 +19,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from .config import get_settings
+from .operations import operations
 
 logger = logging.getLogger("QQBotBridge")
 router = APIRouter()
@@ -65,7 +70,8 @@ _HELP_MESSAGE = """Music-bot 使用帮助
 ├─ 搜歌 <关键词>
 │  └─ 选歌 <编号>（结果保留5分钟）
 ├─ 状态 —— 当前歌曲、进度和在线人数
-├─ 队列 —— 查看当前及待播歌曲
+├─ 面板 / 队列 —— 查看当前队列和删除按钮
+├─ 删除 <编号...> —— 删除指定待播歌曲
 ├─ 暂停 / 继续
 ├─ 切歌
 └─ 停止
@@ -88,12 +94,14 @@ _HELP_MESSAGE = """Music-bot 使用帮助
 def _qq_song_payload(song: dict, index: int | None = None) -> dict:
     """Return only the song metadata needed by the QQ reply renderer."""
     payload = {
-        "id": str(song.get("id") or song.get("mid") or ""),
+        "id": str(song.get("id") or song.get("mid") or song.get("song_id") or ""),
         "name": str(song.get("name") or "未知歌曲"),
         "artists": str(song.get("artists") or "未知歌手"),
         "album": str(song.get("album") or ""),
-        "duration": str(song.get("durationText") or ""),
+        "duration": str(song.get("durationText") or song.get("duration") or ""),
+        "durationText": str(song.get("durationText") or song.get("duration") or ""),
         "cover": str(song.get("cover") or ""),
+        "platform": str(song.get("platform") or "qq"),
     }
     if index is not None:
         payload["index"] = index
@@ -635,6 +643,86 @@ def _all_voice_channels_summary(music, area: str, bot_user: str) -> str:
     return "\n".join(lines)
 
 
+def _voice_channels_payload(
+    music,
+    area: str,
+    configured_channel: str,
+    bot_user: str,
+) -> list[dict]:
+    """返回面板可直接渲染的语音频道和成员数据。"""
+    sender = getattr(music, "sender", None)
+    if sender is None:
+        raise RuntimeError("Oopz 频道查询接口不可用")
+    groups = sender.get_area_channels(area=area, quiet=True)
+    channel_members = sender.get_voice_channel_members(area=area)
+    if not isinstance(groups, list) or not isinstance(channel_members, dict):
+        raise RuntimeError("Oopz 频道接口返回格式无效")
+
+    resolver = getattr(music, "names", None)
+    channels: list[dict] = []
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        for channel in group.get("channels") or []:
+            if not isinstance(channel, dict):
+                continue
+            if str(channel.get("type") or "").upper() not in {"VOICE", "AUDIO"}:
+                continue
+            channel_id = str(channel.get("id") or "").strip()
+            if not channel_id:
+                continue
+            raw_members = channel_members.get(channel_id) or []
+            if isinstance(raw_members, dict):
+                raw_members = raw_members.get("members") or raw_members.get("list") or []
+            if not isinstance(raw_members, list):
+                raw_members = []
+            members: list[dict] = []
+            seen: set[str] = set()
+            for member in raw_members:
+                if isinstance(member, dict):
+                    uid = str(
+                        member.get("uid")
+                        or member.get("id")
+                        or member.get("personUid")
+                        or member.get("person_uid")
+                        or ""
+                    ).strip()
+                    display_name = str(
+                        member.get("name")
+                        or member.get("nickname")
+                        or member.get("username")
+                        or ""
+                    ).strip()
+                else:
+                    uid = str(member or "").strip()
+                    display_name = ""
+                if not uid or uid in seen:
+                    continue
+                seen.add(uid)
+                if not display_name and resolver is not None:
+                    try:
+                        display_name = str(resolver.user(uid) or "").strip()
+                    except Exception:
+                        display_name = ""
+                members.append(
+                    {
+                        "id": uid,
+                        "name": display_name or f"用户 {uid[:8]}",
+                        "is_bot": uid == bot_user,
+                    }
+                )
+            channels.append(
+                {
+                    "id": channel_id,
+                    "name": str(channel.get("name") or channel_id[:8]),
+                    "configured": channel_id == configured_channel,
+                    "members": members,
+                    "member_count": sum(not item["is_bot"] for item in members),
+                }
+            )
+    return channels
+
+
 def _format_seconds(value) -> str:
     try:
         seconds = max(0, int(float(value or 0)))
@@ -676,42 +764,68 @@ def _music_channel_member_count(music, area: str, voice_channel: str, bot_user: 
     return len(uids)
 
 
-def _status_summary(music, area: str, voice_channel: str, bot_user: str) -> str:
+def _playback_payload(music, area: str, voice_channel: str, bot_user: str) -> dict:
     queue = music._get_queue(area)
     current = queue.get_current()
-    pending_count = int(queue.get_queue_length() or 0)
-    online_count = _music_channel_member_count(music, area, voice_channel, bot_user)
-
-    lines = ["Oopz Music 状态"]
+    play_state = queue.get_play_state() or {}
+    duration_seconds = 0.0
+    elapsed = 0.0
     if current:
-        name = str(current.get("name") or "未知歌曲")
-        artists = str(current.get("artists") or "未知歌手")
-        play_state = queue.get_play_state() or {}
         duration_seconds = float(current.get("duration_ms") or 0) / 1000
         if not duration_seconds:
             duration_seconds = float(play_state.get("duration") or 0)
         if play_state.get("paused"):
             elapsed = float(play_state.get("pause_elapsed") or 0)
-            state_text = "已暂停"
         else:
             start_time = float(play_state.get("start_time") or 0)
             elapsed = max(0.0, time.time() - start_time) if start_time else 0.0
-            state_text = "播放中"
         if duration_seconds:
             elapsed = min(elapsed, duration_seconds)
+
+    return {
+        "current": _qq_song_payload(current) if current else None,
+        "playing": bool(current),
+        "paused": bool(play_state.get("paused")),
+        "loading": bool(play_state.get("loading")),
+        "progress": elapsed,
+        "duration": duration_seconds,
+        "queue_length": int(queue.get_queue_length() or 0),
+        "online_count": _music_channel_member_count(
+            music,
+            area,
+            voice_channel,
+            bot_user,
+        ),
+    }
+
+
+def _status_summary(
+    music,
+    area: str,
+    voice_channel: str,
+    bot_user: str,
+    playback: dict | None = None,
+) -> str:
+    playback = playback or _playback_payload(music, area, voice_channel, bot_user)
+    current = playback["current"]
+
+    lines = ["Oopz Music 状态"]
+    if current:
+        state_text = "已暂停" if playback["paused"] else "播放中"
         lines.extend(
             [
                 "├─ 当前播放",
-                f"│  ├─ {name} - {artists}",
-                f"│  ├─ {_format_seconds(elapsed)} / {_format_seconds(duration_seconds)}",
+                f"│  ├─ {current['name']} - {current['artists']}",
+                f"│  ├─ {_format_seconds(playback['progress'])} / "
+                f"{_format_seconds(playback['duration'])}",
                 f"│  └─ {state_text}",
             ]
         )
     else:
         lines.append("├─ 当前播放：无")
 
-    lines.append(f"├─ 待播队列：{pending_count} 首")
-    lines.append(f"└─ Music 在线：{online_count} 人")
+    lines.append(f"├─ 待播队列：{playback['queue_length']} 首")
+    lines.append(f"└─ Music 在线：{playback['online_count']} 人")
     return "\n".join(lines)
 
 
@@ -743,7 +857,55 @@ def _queue_summary(music, area: str) -> str:
         )
     if len(pending) > 10:
         lines.append(f"   └─ ……另有 {len(pending) - 10} 首")
+    lines.append("发送：删除 <编号...>，例如“删除 2 5”")
     return "\n".join(lines)
+
+
+def _queue_panel(music, area: str, notice: str = "") -> dict:
+    queue = music._get_queue(area)
+    current = queue.get_current()
+    pending = queue.get_queue()
+    message = _queue_summary(music, area)
+    if notice:
+        message = f"{notice}\n\n{message}"
+    return {
+        "ok": True,
+        "reply_type": "queue_panel",
+        "message": message,
+        "notice": notice,
+        "current": _qq_song_payload(current) if current else None,
+        "queue_items": [
+            _qq_song_payload(song, index)
+            for index, song in enumerate(pending[:10], 1)
+        ],
+        "queue_all": [
+            _qq_song_payload(song, index)
+            for index, song in enumerate(pending, 1)
+        ],
+        "queue_length": len(pending),
+    }
+
+
+def _parse_queue_positions(value: str) -> list[int] | None:
+    tokens = [token for token in re.split(r"[\s,，]+", value.strip()) if token]
+    if not tokens or len(tokens) > 10 or any(not token.isdigit() for token in tokens):
+        return None
+    positions = [int(token) for token in tokens]
+    return positions if all(position > 0 for position in positions) else None
+
+
+def _remove_queue_items(music, area: str, positions: list[int]) -> dict:
+    queue = music._get_queue(area)
+    try:
+        removed = queue.remove_positions(positions)
+    except IndexError:
+        length = queue.get_queue_length()
+        if not length:
+            return {"ok": False, "message": "待播队列为空，没有可删除的歌曲"}
+        return {"ok": False, "message": f"编号超出范围，请输入 1-{length}"}
+
+    names = "、".join(str(song.get("name") or "未知歌曲") for song in removed)
+    return _queue_panel(music, area, f"已删除 {len(removed)} 首：{names}")
 
 
 def _search_keyword(command: str) -> str:
@@ -759,11 +921,11 @@ def _search_songs(music, keyword: str, requester_key: str) -> dict:
     if len(keyword) > 100:
         return {"ok": False, "message": "搜索关键词过长"}
 
-    results = music.search_candidates(keyword, "qq", limit=5)
+    results = music.search_candidates(keyword, "qq", limit=10)
     if not results:
         return {"ok": False, "message": f"QQ音乐未找到：{keyword}"}
 
-    songs = [dict(song, platform="qq") for song in results[:5]]
+    songs = [dict(song, platform="qq") for song in results[:10]]
     _search_sessions[requester_key] = {
         "expires_at": time.monotonic() + _SEARCH_SESSION_TTL_SECONDS,
         "songs": songs,
@@ -841,18 +1003,37 @@ def _execute_command(command: str, requester_key: str) -> dict:
             }
 
         if command in {"状态", "当前播放", "播放状态"}:
+            playback = _playback_payload(
+                music,
+                area=area,
+                voice_channel=voice_channel,
+                bot_user=bot_user,
+            )
             return {
                 "ok": True,
+                "reply_type": "playback_status",
                 "message": _status_summary(
                     music,
                     area=area,
                     voice_channel=voice_channel,
                     bot_user=bot_user,
+                    playback=playback,
                 ),
+                **playback,
             }
 
-        if command in {"队列", "播放队列", "待播"}:
-            return {"ok": True, "message": _queue_summary(music, area)}
+        queue_remove = re.fullmatch(
+            r"(?:删除(?:队列)?|移除(?:队列)?|队列(?:删除|移除))\s+(.+)",
+            command,
+        )
+        if queue_remove:
+            positions = _parse_queue_positions(queue_remove.group(1))
+            if positions is None:
+                return {"ok": False, "message": "用法：删除 <编号...>，例如“删除 2 5”"}
+            return _remove_queue_items(music, area, positions)
+
+        if command in {"队列", "播放队列", "待播", "面板", "队列面板", "播放面板"}:
+            return _queue_panel(music, area)
 
         if command in {"排行榜", "榜单", "QQ音乐排行榜", "QQ排行榜"}:
             return _rank_catalog()
@@ -1035,26 +1216,159 @@ def _execute_command(command: str, requester_key: str) -> dict:
 
         return {
             "ok": False,
-            "message": "无法识别命令。请使用：点歌 <歌名>、暂停、继续、切歌、停止",
+            "message": "无法识别命令。请使用：面板、搜歌 <歌名>、点歌 <歌名>、暂停、继续、切歌、停止",
         }
 
 
-@router.post("/internal/qqbot/command")
-async def qqbot_command(request: Request):
+def _bridge_request_allowed(request: Request) -> JSONResponse | None:
     client_host = request.client.host if request.client else ""
-    if client_host not in _LOOPBACK_HOSTS:
+    settings = get_settings()
+    private_client = False
+    try:
+        private_client = ipaddress.ip_address(client_host).is_private
+    except ValueError:
+        pass
+    allowed_client = client_host in _LOOPBACK_HOSTS or (
+        settings.bridge_private_network and private_client
+    )
+    if not allowed_client:
         return JSONResponse(
-            {"ok": False, "message": "仅允许本机访问"},
+            {"ok": False, "message": "仅允许本机或已启用的容器内网访问"},
             status_code=403,
         )
 
-    expected_token = get_settings().bridge_token
     supplied_token = request.headers.get("x-qqbot-bridge-token", "")
-    if not expected_token or not secrets.compare_digest(supplied_token, expected_token):
+    if not settings.bridge_token or not secrets.compare_digest(
+        supplied_token,
+        settings.bridge_token,
+    ):
         return JSONResponse(
             {"ok": False, "message": "桥接认证失败"},
             status_code=401,
         )
+    return None
+
+
+def _command_event(command: str, result: dict, source: str) -> None:
+    if not result.get("ok"):
+        return
+    mutating = (
+        "点歌",
+        "播放",
+        "选歌",
+        "榜单点歌",
+        "榜单批量",
+        "删除",
+        "移除",
+        "暂停",
+        "继续",
+        "恢复",
+        "切歌",
+        "下一首",
+        "跳过",
+        "停止",
+    )
+    if command.startswith(mutating):
+        operations.record_event(
+            "command",
+            str(result.get("message") or f"已执行：{command}"),
+            source=source or "未知用户",
+        )
+
+
+def _service_health(music) -> dict[str, dict]:
+    settings = get_settings()
+    stored = operations.snapshot().get("components", {})
+    runtime = getattr(music, "runtime", None)
+    oopz_ready = bool(getattr(runtime, "ready", False))
+    components: dict[str, dict] = {
+        "bridge": {"status": "online", "message": "内部控制接口正常"},
+        "oopz": {
+            "status": "online" if oopz_ready else "error",
+            "message": "OOPZ SDK 已连接" if oopz_ready else "OOPZ SDK 未就绪",
+        },
+        "qq_bot": stored.get(
+            "qq_bot",
+            {"status": "starting", "message": "等待 QQ 网关上线"},
+        ),
+    }
+
+    if settings.qq_music_enabled:
+        try:
+            response = requests.get(
+                f"{settings.qq_music_base_url.rstrip('/')}/explorer/metadata",
+                timeout=3,
+            )
+            response.raise_for_status()
+            components["qq_music"] = {
+                "status": "online",
+                "message": "QQ 音乐接口可访问",
+            }
+        except Exception as exc:
+            components["qq_music"] = {
+                "status": "error",
+                "message": f"QQ 音乐接口异常：{type(exc).__name__}",
+            }
+    else:
+        components["qq_music"] = {"status": "disabled", "message": "未启用"}
+
+    jm_enabled = _env("QQBOT_JM_ENABLED").lower() in {"1", "true", "yes", "on"}
+    if not jm_enabled:
+        components["uploader"] = {"status": "disabled", "message": "JM 未启用"}
+    else:
+        project_root = Path(__file__).resolve().parents[1]
+        uploader = Path(
+            _env("QQBOT_JM_UPLOADER")
+            or project_root / "tools" / "qqbot-uploader" / "uploader.mjs"
+        )
+        node = _env("QQBOT_JM_NODE") or "node"
+        sdk = uploader.parent / "node_modules" / "@tencent-connect" / "qqbot-nodejs"
+        ready = uploader.is_file() and (Path(node).is_file() or shutil.which(node)) and sdk.is_dir()
+        components["uploader"] = {
+            "status": "online" if ready else "error",
+            "message": "QQ 分片上传器就绪" if ready else "上传器或依赖缺失",
+        }
+    return components
+
+
+def _panel_snapshot() -> dict:
+    with _command_lock:
+        music = _music_handler()
+        if music is None:
+            raise RuntimeError("Oopzbot 音乐模块尚未初始化")
+        area, _text_channel, voice_channel, bot_user = _command_config()
+        if not all((area, voice_channel, bot_user)):
+            raise RuntimeError("Oopz 域或语音频道尚未配置")
+        playback = _playback_payload(music, area, voice_channel, bot_user)
+        queue = _queue_panel(music, area)
+        channel_error = ""
+        try:
+            channels = _voice_channels_payload(music, area, voice_channel, bot_user)
+        except Exception as exc:
+            logger.warning("面板读取语音频道失败: %s", exc)
+            channels = []
+            channel_error = str(exc)[:300]
+    records = operations.snapshot()
+    return {
+        "ok": True,
+        "playback": playback,
+        "queue": queue.get("queue_all", []),
+        "queue_length": queue.get("queue_length", 0),
+        "channels": channels,
+        "channel_error": channel_error,
+        "health": _service_health(music),
+        "events": records.get("events", []),
+        "jm_jobs": records.get("jm_jobs", []),
+        "jm_enabled": _env("QQBOT_JM_ENABLED").lower()
+        in {"1", "true", "yes", "on"},
+        "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+
+
+@router.post("/internal/qqbot/command")
+async def qqbot_command(request: Request):
+    if rejection := _bridge_request_allowed(request):
+        return rejection
 
     try:
         body = await request.json()
@@ -1078,15 +1392,31 @@ async def qqbot_command(request: Request):
 
     try:
         requester_id = str(body.get("requester_id") or "anonymous").strip()
+        requester_name = str(body.get("requester_name") or requester_id).strip()
         group_openid = str(body.get("group_openid") or "unknown-group").strip()
         requester_key = f"{group_openid}:{requester_id}"
         result = await asyncio.to_thread(_execute_command, command, requester_key)
+        _command_event(command, result, requester_name)
         return JSONResponse(result)
     except Exception as exc:
         logger.exception("执行 QQBot 桥接命令失败")
         return JSONResponse(
             {"ok": False, "message": f"执行失败: {type(exc).__name__}"},
             status_code=500,
+        )
+
+
+@router.get("/internal/panel/snapshot")
+async def panel_snapshot(request: Request):
+    if rejection := _bridge_request_allowed(request):
+        return rejection
+    try:
+        return JSONResponse(await asyncio.to_thread(_panel_snapshot))
+    except Exception as exc:
+        logger.exception("生成面板快照失败")
+        return JSONResponse(
+            {"ok": False, "message": f"读取状态失败: {type(exc).__name__}"},
+            status_code=503,
         )
 
 
