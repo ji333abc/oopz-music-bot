@@ -23,6 +23,7 @@ from .observability import (
     command_context,
     current_command_id,
     ensure_command_id,
+    redact_secrets,
 )
 from .operations import operations
 
@@ -1520,7 +1521,7 @@ def _panel_snapshot() -> dict:
         except Exception as exc:
             logger.warning("面板读取语音频道失败: %s", exc)
             channels = []
-            channel_error = str(exc)[:300]
+            channel_error = redact_secrets(str(exc), max_length=240)
     records = operations.snapshot()
     return {
         "ok": True,

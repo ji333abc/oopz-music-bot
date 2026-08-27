@@ -10,6 +10,8 @@ from pathlib import Path
 from threading import RLock
 from uuid import uuid4
 
+from .observability import redact_secrets
+
 
 COMPONENT_STATUSES = frozenset(
     {"starting", "ok", "degraded", "error", "offline", "unknown"}
@@ -67,7 +69,7 @@ class OperationsRegistry:
             raise ValueError(
                 f"组件状态必须是 {', '.join(sorted(COMPONENT_STATUSES))}"
             )
-        reason = " ".join(str(message or "未知原因").split())[:240]
+        reason = redact_secrets(" ".join(str(message or "未知原因").split()), max_length=240)
         with self._lock:
             self._data["components"][name] = {
                 "status": normalized_status,

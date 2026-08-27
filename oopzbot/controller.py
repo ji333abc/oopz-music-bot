@@ -194,7 +194,13 @@ class MusicController:
             raise RuntimeError("歌曲缺少 ID")
         url = platform.get_song_url(str(song_id))
         if not url:
-            raise RuntimeError("无法获取歌曲播放地址")
+            failure = getattr(platform, "last_error", None)
+            message = (
+                str(failure.get("message"))
+                if isinstance(failure, dict) and failure.get("message")
+                else "无法获取歌曲播放地址"
+            )
+            raise RuntimeError(message[:240])
         playable = dict(song, url=url)
         return self._build_song_data_from_platform_data(
             playable, platform_name, str(song_id), channel, area, user
@@ -203,6 +209,9 @@ class MusicController:
     def play_song(self, keyword: str, platform: str, channel: str, area: str, user: str) -> dict:
         results = self.search_candidates(keyword, platform, limit=1)
         if not results:
+            failure = getattr(self.platforms.get(platform), "last_error", None)
+            if isinstance(failure, dict) and failure.get("message"):
+                return {"code": "error", "message": str(failure["message"])[:240]}
             return {"code": "error", "message": f"未找到歌曲：{keyword}"}
         return self.play_song_choice(results[0], channel, area, user)
 

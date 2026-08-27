@@ -38,6 +38,7 @@ class QQMusic:
             settings.qq_music_fallback_quality,
             default="128",
         )
+        self.last_error: dict[str, str] | None = None
         self._session = requests.Session()
         if self.enabled and not self.base_url:
             logger.warning("QQ 音乐 API 地址未配置 (QQ_MUSIC_BASE_URL)")
@@ -49,7 +50,9 @@ class QQMusic:
 
     def _get(self, path: str, params: dict | None = None) -> dict | None:
         if not self.base_url:
+            self.last_error = {"type": "config", "message": "QQ音乐接口未配置"}
             return None
+        self.last_error = None
         try:
             headers = {}
             if self.cookie:
@@ -62,7 +65,26 @@ class QQMusic:
             )
             response.raise_for_status()
             return response.json()
+        except requests.Timeout:
+            self.last_error = {
+                "type": "timeout",
+                "message": "QQ音乐接口请求超时，请稍后重试",
+            }
+            logger.error("QQ 音乐 API 请求超时: path=%s", path)
+            return None
+        except requests.HTTPError as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", "unknown")
+            self.last_error = {
+                "type": "http",
+                "message": f"QQ音乐接口异常（HTTP {status}），请稍后重试",
+            }
+            logger.error("QQ 音乐 API HTTP 异常: path=%s status=%s", path, status)
+            return None
         except Exception as exc:
+            self.last_error = {
+                "type": "network",
+                "message": "QQ音乐接口连接失败，请稍后重试",
+            }
             logger.error("QQ 音乐 API 请求失败: %s", exc)
             return None
 
@@ -211,17 +233,19 @@ class QQMusic:
     def summarize(self, keyword: str) -> dict:
         song = self.search(keyword)
         if not song:
+            error = getattr(self, "last_error", None)
             return {
                 "code": "error",
-                "message": f"QQ音乐未找到: {keyword}",
+                "message": str(error.get("message") if error else f"QQ音乐未找到: {keyword}"),
                 "data": None,
             }
         mid = song.get("mid") or song.get("id")
         url = self.get_song_url(mid)
         if not url:
+            error = getattr(self, "last_error", None)
             return {
                 "code": "error",
-                "message": f"QQ音乐无法获取播放链接: {song['name']}",
+                "message": str(error.get("message") if error else f"QQ音乐无法获取播放链接: {song['name']}"),
                 "data": None,
             }
         song["url"] = url
@@ -236,17 +260,19 @@ class QQMusic:
     def summarize_by_id(self, song_id) -> dict:
         song = self.get_song_detail(song_id)
         if not song:
+            error = getattr(self, "last_error", None)
             return {
                 "code": "error",
-                "message": f"QQ音乐无法获取歌曲信息: {song_id}",
+                "message": str(error.get("message") if error else f"QQ音乐无法获取歌曲信息: {song_id}"),
                 "data": None,
             }
         mid = song.get("mid") or song.get("id")
         url = self.get_song_url(mid)
         if not url:
+            error = getattr(self, "last_error", None)
             return {
                 "code": "error",
-                "message": f"QQ音乐无法获取播放链接: {song['name']}",
+                "message": str(error.get("message") if error else f"QQ音乐无法获取播放链接: {song['name']}"),
                 "data": None,
             }
         song["url"] = url
