@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from .observability import RedactionFilter, install_log_record_factory
-
+from .observability import install_log_record_factory, RedactionFilter
 
 LOG_FORMAT = "%(asctime)s [%(name)s] %(levelname)s command_id=%(command_id)s: %(message)s"
 

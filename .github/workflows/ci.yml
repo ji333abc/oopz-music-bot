@@ -73,7 +73,7 @@ jobs:
         run: |
           set -euo pipefail
           ci_env="$RUNNER_TEMP/oopzbot-ci.env"
-          python -c 'from pathlib import Path; Path(r"'$RUNNER_TEMP'/oopzbot-ci.env").write_text("QQBOT_APP_ID=ci-placeholder\\nQQBOT_APP_SECRET=ci-placeholder\\nQQBOT_BRIDGE_TOKEN=ci-placeholder-token\\nOOPZ_PANEL_PASSWORD=ci-placeholder-password\\nOOPZ_AGORA_APP_ID=ci-placeholder\\nQQBOT_OOPZ_AREA_ID=ci-area\\nQQBOT_OOPZ_TEXT_CHANNEL_ID=ci-text\\nQQBOT_OOPZ_VOICE_CHANNEL_ID=ci-voice\\n", encoding="utf-8")'
+          python -c 'from pathlib import Path; Path(r"'$RUNNER_TEMP'/oopzbot-ci.env").write_text("QQBOT_APP_ID=ci-placeholder\nQQBOT_APP_SECRET=ci-placeholder\nQQBOT_BRIDGE_TOKEN=ci-placeholder-token\nOOPZ_PANEL_PASSWORD=ci-placeholder-password\nOOPZ_AGORA_APP_ID=ci-placeholder\nQQBOT_OOPZ_AREA_ID=ci-area\nQQBOT_OOPZ_TEXT_CHANNEL_ID=ci-text\nQQBOT_OOPZ_VOICE_CHANNEL_ID=ci-voice\n", encoding="utf-8")'
           cp "$ci_env" .env
           trap 'rm -f .env "$ci_env"' EXIT
           docker compose config --quiet

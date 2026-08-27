@@ -20,8 +20,8 @@ import botpy
 import requests
 from botpy.message import GroupMessage
 
-from .operations import operations
 from .observability import command_context, ensure_command_id
+from .operations import operations
 from .process_env import minimal_child_environment
 
 logger = logging.getLogger("QQBotService")

@@ -5,13 +5,12 @@ from __future__ import annotations
 import json
 import os
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import RLock
 from uuid import uuid4
 
 from .observability import redact_secrets
-
 
 COMPONENT_STATUSES = frozenset(
     {"starting", "ok", "degraded", "error", "offline", "unknown"}
@@ -20,7 +19,7 @@ _STATUS_ALIASES = {"online": "ok", "disabled": "offline"}
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 class OperationsRegistry:

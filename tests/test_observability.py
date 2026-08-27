@@ -10,8 +10,8 @@ from oopzbot.logging_config import LOG_FORMAT
 from oopzbot.observability import (
     command_context,
     ensure_command_id,
-    is_valid_command_id,
     install_log_record_factory,
+    is_valid_command_id,
     new_command_id,
     redact_secrets,
 )

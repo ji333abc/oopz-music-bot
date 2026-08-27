@@ -10,7 +10,7 @@ import re
 import secrets
 import shutil
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 
@@ -1375,7 +1375,7 @@ def _health_entry(status: str, reason: str) -> dict[str, str]:
         "status": status,
         "reason": safe_reason,
         "message": safe_reason,
-        "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "updated_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
 
 
@@ -1538,7 +1538,7 @@ def _panel_snapshot() -> dict:
         "jm_jobs": records.get("jm_jobs", []),
         "jm_enabled": _env("QQBOT_JM_ENABLED").lower()
         in {"1", "true", "yes", "on"},
-        "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "updated_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
 
 

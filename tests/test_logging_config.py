@@ -9,7 +9,6 @@ from unittest.mock import patch
 
 from oopzbot.logging_config import configure_logging, is_console_handler
 
-
 ROOT = Path(__file__).resolve().parents[1]
 LEGACY_SOURCE = ROOT / "legacy_oopzbot" / "src"
 sys.path.insert(0, str(LEGACY_SOURCE))
