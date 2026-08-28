@@ -1397,11 +1397,16 @@ def _websocket_status(runtime) -> tuple[str, str]:
         return "starting", "OOPZ WebSocket 尚未初始化"
     context = getattr(runtime, "context", None)
     if context is not None:
-        thread = getattr(getattr(context, "client", None), "_thread", None)
-        if thread is not None and thread.is_alive():
-            return "ok", "OOPZ WebSocket 已连接"
+        client = getattr(context, "client", None)
+        if bool(getattr(client, "authenticated", False)):
+            return "ok", "OOPZ WebSocket 已连接并通过认证"
+        if bool(getattr(client, "connected", False)):
+            return "starting", "OOPZ WebSocket 已连接，等待认证"
         if getattr(runtime, "_closed", None) is not None and runtime._closed.is_set():
             return "offline", "OOPZ WebSocket 已断开"
+        thread = getattr(client, "_thread", None)
+        if thread is not None and thread.is_alive():
+            return "degraded", "OOPZ WebSocket 已断开，正在重连"
         return "degraded", "OOPZ WebSocket 未连接"
     status, reason = _runtime_status(runtime)
     return status, "OOPZ WebSocket " + reason.removeprefix("OOPZ ")
@@ -1421,7 +1426,12 @@ def _voice_status(music, runtime) -> tuple[str, str]:
 
 def _redis_status(music) -> tuple[str, str]:
     queue = getattr(music, "queue", None)
-    client = getattr(queue, "_redis", None)
+    try:
+        client = getattr(queue, "redis", None)
+    except Exception as exc:
+        return "degraded", f"Redis 探测失败：{type(exc).__name__}"
+    if client is None:
+        client = getattr(queue, "_redis", None)
     if client is None:
         try:
             from core import queue_manager

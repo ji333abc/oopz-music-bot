@@ -64,8 +64,7 @@ class LegacyOopzCore:
     def ready(self) -> bool:
         if self.context is None or self._closed.is_set():
             return False
-        thread = getattr(self.context.client, "_thread", None)
-        return bool(thread and thread.is_alive())
+        return bool(getattr(self.context.client, "authenticated", False))
 
     def start(self) -> LegacyMusicAdapter:
         if self.music is not None:

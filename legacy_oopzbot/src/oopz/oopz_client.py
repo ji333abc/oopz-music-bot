@@ -129,6 +129,8 @@ class OopzClient:
         self._ws: Optional[websocket.WebSocketApp] = None
         self._running = False
         self._thread: Optional[threading.Thread] = None
+        self._connected = threading.Event()
+        self._authenticated = threading.Event()
         self._consecutive_failures = 0
         self._fail_lock = threading.Lock()
         self._hb_body = json.dumps({"person": self._person_id})
@@ -138,6 +140,16 @@ class OopzClient:
     # ------------------------------------------------------------------
     # 公共接口
     # ------------------------------------------------------------------
+
+    @property
+    def connected(self) -> bool:
+        ws = self._ws
+        socket_connected = bool(ws and ws.sock and ws.sock.connected)
+        return self._connected.is_set() and socket_connected and not self._connection_is_stale()
+
+    @property
+    def authenticated(self) -> bool:
+        return self.connected and self._authenticated.is_set()
 
     def _next_reconnect_delay(self) -> float:
         with self._fail_lock:
@@ -183,6 +195,8 @@ class OopzClient:
     def stop(self):
         """停止客户端"""
         self._running = False
+        self._connected.clear()
+        self._authenticated.clear()
         if self._ws:
             self._ws.close()
 
@@ -248,6 +262,8 @@ class OopzClient:
 
     def _connect_and_run(self):
         """建立一次 WebSocket 连接并持续运行直到断开"""
+        self._connected.clear()
+        self._authenticated.clear()
         ws_headers = {
             "User-Agent": DEFAULT_HEADERS["User-Agent"],
             "Origin": DEFAULT_HEADERS["Origin"],
@@ -280,11 +296,15 @@ class OopzClient:
 
     def _on_open(self, ws):
         logger.info("WebSocket 连接已建立")
+        self._connected.set()
+        self._authenticated.clear()
         self._last_recv_time = time.time()
         self._send_auth(ws)
         threading.Thread(target=self._heartbeat_loop, args=(ws,), daemon=True).start()
 
     def _on_message(self, ws, message: str):
+        if ws.sock and ws.sock.connected:
+            self._connected.set()
         self._last_recv_time = time.time()
         try:
             data = _json_loads(message)
@@ -324,6 +344,8 @@ class OopzClient:
 
         # 服务端 serverId 确认
         if event == EVENT_SERVER_ID:
+            # serverId is only issued after the server accepts the session.
+            self._authenticated.set()
             self._send_heartbeat(ws)
             logger.info("收到 serverId，已发送首次心跳")
             return
@@ -346,9 +368,13 @@ class OopzClient:
                 logger.warning("on_other_event 处理异常", exc_info=True)
 
     def _on_error(self, ws, error):
+        self._connected.clear()
+        self._authenticated.clear()
         logger.error(f"WebSocket 错误: {error}")
 
     def _on_close(self, ws, code, reason):
+        self._connected.clear()
+        self._authenticated.clear()
         logger.warning(f"连接关闭 (code={code}, reason={reason})")
 
     def _handle_auth_response(self, ws, data: dict) -> None:
@@ -359,8 +385,10 @@ class OopzClient:
         """
         body = self._safe_json_parse(data.get("body", {}))
         if not _auth_response_failed(body):
+            self._authenticated.set()
             logger.info("WS 认证响应: %s", json.dumps(body, ensure_ascii=False)[:300])
             return
+        self._authenticated.clear()
         logger.error(
             "WS 认证被拒绝（凭据可能已失效）: %s",
             json.dumps(body, ensure_ascii=False)[:300],

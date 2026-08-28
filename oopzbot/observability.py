@@ -26,10 +26,19 @@ SECRET_ENV_NAMES = (
     "RACKNERD_API_HASH",
     "OOPZ_RSA_PRIVATE_KEY",
     "OOPZ_PRIVATE_KEY",
+    "OOPZ_LEGACY_ADMIN_PASSWORD",
+    "BOT_REDIS_PASSWORD",
+    "ONEBOT_V11_ACCESS_TOKEN",
+    "ONEBOT_V11_SECRET",
+    "NETEASE_MUSIC_COOKIE",
+    "BILIBILI_MUSIC_COOKIE",
+    "DOUBAO_API_KEY",
 )
 _SECRET_ASSIGNMENT = re.compile(
     r"(?i)(qqbot_app_secret|qqbot_bridge_token|oopz(?:_login)?_password|"
     r"oopz_jwt_token|qq_music_cookie|(?:qqbot_)?jm_zip_password|"
+    r"oopz_legacy_admin_password|bot_redis_password|onebot_v11_(?:access_token|secret)|"
+    r"(?:netease|bilibili)_music_cookie|doubao_api_key|"
     r"racknerd_api_(?:key|hash))\s*[:=]\s*([^\s,;]+)"
 )
 _AUTHORIZATION = re.compile(r"(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;]+")

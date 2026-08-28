@@ -101,6 +101,42 @@ class HealthSnapshotTests(unittest.TestCase):
 
         self.assertEqual(snapshot["redis"]["status"], "degraded")
 
+    def test_live_reconnect_thread_is_not_reported_as_connected(self) -> None:
+        client = types.SimpleNamespace(
+            authenticated=False,
+            connected=False,
+            _thread=types.SimpleNamespace(is_alive=lambda: True),
+        )
+        runtime = types.SimpleNamespace(
+            context=types.SimpleNamespace(client=client),
+            _closed=types.SimpleNamespace(is_set=lambda: False),
+        )
+
+        status, reason = bridge._websocket_status(runtime)
+
+        self.assertEqual(status, "degraded")
+        self.assertIn("重连", reason)
+
+    def test_authenticated_websocket_is_reported_as_ready(self) -> None:
+        client = types.SimpleNamespace(authenticated=True, connected=True)
+        runtime = types.SimpleNamespace(
+            context=types.SimpleNamespace(client=client),
+            _closed=types.SimpleNamespace(is_set=lambda: False),
+        )
+
+        self.assertEqual(bridge._websocket_status(runtime)[0], "ok")
+
+    def test_redis_probe_failure_is_degraded(self) -> None:
+        class BrokenQueue:
+            @property
+            def redis(self):
+                raise ConnectionError("redis offline")
+
+        status, reason = bridge._redis_status(types.SimpleNamespace(queue=BrokenQueue()))
+
+        self.assertEqual(status, "degraded")
+        self.assertIn("ConnectionError", reason)
+
     def test_health_reason_redacts_configured_credentials(self) -> None:
         with patch.dict(
             os.environ,

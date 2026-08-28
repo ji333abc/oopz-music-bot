@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import os
 import sys
@@ -70,6 +71,29 @@ class QQMusicFailureTests(unittest.TestCase):
 
         self.assertIsNone(client.get_song_url("empty-url"))
 
+    def test_cookie_rejection_is_reported_as_http_auth_failure(self) -> None:
+        client = QQMusic.__new__(QQMusic)
+        client.base_url = "http://fake-qqmusic"
+        client.cookie = "expired-cookie"
+
+        class UnauthorizedResponse:
+            status_code = 401
+
+            def raise_for_status(self):
+                raise requests.HTTPError("fake 401", response=self)
+
+            def json(self):
+                return {}
+
+        client._session = types.SimpleNamespace(
+            get=lambda *_args, **_kwargs: UnauthorizedResponse()
+        )
+
+        result = client.summarize("login-only-song")
+
+        self.assertEqual(result["code"], "error")
+        self.assertIn("HTTP 401", result["message"])
+
 
 class JMFailureTests(unittest.IsolatedAsyncioTestCase):
     async def test_download_failure_releases_the_task_lock(self) -> None:
@@ -92,6 +116,43 @@ class JMFailureTests(unittest.IsolatedAsyncioTestCase):
                 qqbot.JM_TEMP_ROOT = original_root
 
         self.assertFalse(result["ok"])
+        self.assertTrue(qqbot._jm_job_lock.acquire(blocking=False))
+        qqbot._jm_job_lock.release()
+
+    async def test_oversized_archive_releases_lock_and_returns_structured_error(self) -> None:
+        original_root = qqbot.JM_TEMP_ROOT
+        original_limit = qqbot.JM_MAX_BYTES
+        original_retain = qqbot.JM_FAILURE_RETAIN_SECONDS
+        with tempfile.TemporaryDirectory() as temporary:
+            qqbot.JM_TEMP_ROOT = Path(temporary)
+            qqbot.JM_MAX_BYTES = 1
+            qqbot.JM_FAILURE_RETAIN_SECONDS = 0
+
+            def oversized_download(_album_id, _password, job_dir):
+                job_dir.mkdir(parents=True)
+                archive = job_dir / "archive.zip"
+                archive.write_bytes(b"too-large")
+                return archive, {"page_count": 1}
+
+            qqbot._run_jm_download = oversized_download
+            self.assertTrue(qqbot._jm_job_lock.acquire(blocking=False))
+            try:
+                result = await qqbot.OopzQQClient._run_jm_job(
+                    object.__new__(qqbot.OopzQQClient),
+                    types.SimpleNamespace(group_openid="group", id="message"),
+                    "123456",
+                    send_result=False,
+                )
+                await asyncio.sleep(0.01)
+            finally:
+                if qqbot._jm_job_lock.locked():
+                    qqbot._jm_job_lock.release()
+                qqbot.JM_TEMP_ROOT = original_root
+                qqbot.JM_MAX_BYTES = original_limit
+                qqbot.JM_FAILURE_RETAIN_SECONDS = original_retain
+
+        self.assertFalse(result["ok"])
+        self.assertIn("超过", result["error"])
         self.assertTrue(qqbot._jm_job_lock.acquire(blocking=False))
         qqbot._jm_job_lock.release()
 
@@ -137,6 +198,40 @@ class OopzFailureTests(unittest.TestCase):
         result = controller.enter_voice_channel("voice", "area")
 
         self.assertEqual(result["error"], "fake voice offline")
+
+    def test_voice_timeout_returns_a_structured_result(self) -> None:
+        runtime = types.SimpleNamespace(
+            ready=True,
+            join_voice=lambda *_args: (_ for _ in ()).throw(
+                TimeoutError("voice startup timed out")
+            ),
+            leave_voice=lambda: None,
+        )
+        settings = Settings(
+            qqbot_app_id="app",
+            qqbot_app_secret="secret",
+            bridge_token="bridge",
+            bridge_host="127.0.0.1",
+            bridge_port=18080,
+            oopz_area_id="area",
+            oopz_text_channel_id="text",
+            oopz_voice_channel_id="voice",
+            oopz_person_uid="bot",
+            qq_music_enabled=False,
+            qq_music_managed=False,
+            qq_music_base_url="",
+            qq_music_service_dir=".services/qqmusic-api",
+            qq_music_cookie="",
+            qq_music_quality="320",
+            qq_music_fallback_quality="128",
+            log_level="INFO",
+        )
+        controller = MusicController(settings, runtime)
+        self.addCleanup(controller._closed.set)
+
+        result = controller.enter_voice_channel("voice", "area")
+
+        self.assertEqual(result["error"], "voice startup timed out")
 
 
 class StateSafetyTests(unittest.TestCase):

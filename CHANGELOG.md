@@ -3,6 +3,21 @@
 本项目遵循 Keep a Changelog 风格。当前发布版本由 `oopzbot.__version__` 提供，Panel
 `package.json` 和 Git Tag 必须在发布前与它保持一致。
 
+## [0.1.1] - 2026-08-28
+
+### Fixed
+
+- 恢复目标只能指向 Compose 项目的 `data/`，数据目录使用原子替换且归档不能夹带 `.env`。
+- 活跃 SQLite 数据库通过在线备份 API 创建一致快照，备份归档从创建开始即使用受限权限。
+- Redis、QQMusic 故障不再阻止 Bot 和 Panel 启动；Redis 运行中断开会降级并自动恢复。
+- OOPZ WebSocket 和 Redis 组件状态改为真实连接探测，避免重连线程造成假在线。
+- 面板事件和 JM 错误在持久化前统一脱敏。
+
+### Security
+
+- 恢复工具拒绝宽泛目录、Windows 路径穿越、符号链接和隐藏的 `.env` 载荷。
+- 扩大日志与状态脱敏字段范围，覆盖旧版管理密码、Redis 密码和 OneBot 凭据。
+
 ## [0.1.0] - 2026-08-28
 
 ### Added

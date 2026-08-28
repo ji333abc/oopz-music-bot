@@ -5,11 +5,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import tempfile
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+from uuid import uuid4
 
 try:
     from .backup import create_backup
@@ -20,6 +23,8 @@ ARCHIVE_FORMAT_VERSION = 1
 
 
 def _safe_archive_name(name: str) -> PurePosixPath:
+    if "\\" in name or "\x00" in name:
+        raise ValueError(f"归档包含不安全路径：{name}")
     path = PurePosixPath(name)
     if not name or path.is_absolute() or ".." in path.parts or "" in path.parts:
         raise ValueError(f"归档包含不安全路径：{name}")
@@ -71,6 +76,12 @@ def validate_archive(archive_path: str | Path) -> tuple[Path, dict, dict[str, by
         raise ValueError("不支持的备份归档版本")
     if manifest.get("env_included") is True:
         raise ValueError("拒绝恢复包含 .env 的归档，请先人工审查")
+    for name in payload:
+        relative = PurePosixPath(name)
+        if name.startswith("data/") and any(
+            part == ".env" or part.startswith(".env.") for part in relative.parts
+        ):
+            raise ValueError("拒绝恢复包含 .env 的归档")
 
     checksums: dict[str, str] = {}
     for line in payload["checksums.sha256"].decode("utf-8").splitlines():
@@ -102,10 +113,23 @@ def validate_archive(archive_path: str | Path) -> tuple[Path, dict, dict[str, by
     return path, manifest, payload
 
 
-def _validate_target(data_dir: str | Path) -> Path:
-    target = Path(data_dir).expanduser().resolve()
-    if target == Path(target.anchor) or target == Path.cwd().resolve():
-        raise ValueError("拒绝把恢复目标设为文件系统根目录或当前工作区根目录")
+def _validate_target(data_dir: str | Path, compose_file: str | Path) -> Path:
+    requested = Path(data_dir).expanduser()
+    if not requested.is_absolute():
+        requested = Path.cwd() / requested
+    requested = Path(os.path.abspath(requested))
+    compose_path = Path(compose_file).expanduser().resolve()
+    expected = compose_path.parent / "data"
+    target = requested.resolve()
+    home = Path.home().resolve()
+    forbidden = {Path(target.anchor), Path.cwd().resolve(), home, compose_path.parent}
+    if (
+        requested != expected
+        or requested.is_symlink()
+        or target != expected
+        or target in forbidden
+    ):
+        raise ValueError(f"恢复目标必须是 Compose 项目的 data 目录：{expected}")
     return target
 
 
@@ -116,22 +140,30 @@ def _restore_data(data_dir: Path, payload: dict[str, bytes]) -> None:
         if name.startswith("data/")
     }
     with tempfile.TemporaryDirectory(prefix=".oopz-restore-", dir=data_dir.parent) as name:
-        stage = Path(name) / "data"
+        temporary_root = Path(name)
+        stage = temporary_root / "data"
         for relative, content in data_files.items():
             safe = _safe_archive_name(relative)
             destination = stage / Path(*safe.parts)
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(content)
-        data_dir.mkdir(parents=True, exist_ok=True)
-        for child in data_dir.iterdir():
-            if child.name == ".env" or child.name.startswith(".env."):
-                continue
-            if child.is_dir() and not child.is_symlink():
-                shutil.rmtree(child)
-            else:
-                child.unlink()
-        for child in stage.iterdir() if stage.exists() else ():
-            shutil.move(str(child), str(data_dir / child.name))
+        stage.mkdir(parents=True, exist_ok=True)
+        if data_dir.exists():
+            for child in data_dir.iterdir():
+                if child.name == ".env" or child.name.startswith(".env."):
+                    shutil.copy2(child, stage / child.name)
+
+        previous = temporary_root / "previous-data"
+        moved_previous = False
+        try:
+            if data_dir.exists():
+                data_dir.replace(previous)
+                moved_previous = True
+            stage.replace(data_dir)
+        except Exception:
+            if moved_previous and previous.exists() and not data_dir.exists():
+                previous.replace(data_dir)
+            raise
 
 
 def _restore_redis(
@@ -206,10 +238,13 @@ def restore_backup(
     redis_service: str = "redis",
 ) -> Path:
     archive, _manifest, payload = validate_archive(archive_path)
-    target = _validate_target(data_dir)
+    target = _validate_target(data_dir, compose_file)
     recovery_dir = target.parent / "oopz-backups"
     recovery_dir.mkdir(parents=True, exist_ok=True)
-    recovery = recovery_dir / f"pre-restore-{archive.stem}.zip"
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    recovery = recovery_dir / (
+        f"pre-restore-{archive.stem}-{timestamp}-{uuid4().hex[:8]}.zip"
+    )
     create_backup(
         target,
         recovery,

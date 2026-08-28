@@ -173,6 +173,16 @@ class GroupReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("msg_id", api.calls[1])
         self.assertNotEqual(api.calls[0]["msg_seq"], api.calls[1]["msg_seq"])
 
+    async def test_proactive_permission_failure_is_not_retried(self) -> None:
+        api = _FakeGroupAPI(RuntimeError("主动消息失败, 无权限"))
+        message = _FakeGroupMessage(api)
+        client = object.__new__(service.OopzQQClient)
+
+        with self.assertRaisesRegex(RuntimeError, "无权限"):
+            await client._reply(message, "done", proactive=True)
+
+        self.assertEqual(len(api.calls), 1)
+
     async def test_passive_replies_also_use_unique_sequences(self) -> None:
         api = _FakeGroupAPI()
         message = _FakeGroupMessage(api)

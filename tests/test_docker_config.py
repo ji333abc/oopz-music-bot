@@ -43,6 +43,13 @@ class DockerConfigurationTests(unittest.TestCase):
         self.assertIn("OOPZ_LEGACY_SOURCE_ROOT: /app/legacy_oopzbot", compose)
         self.assertIn("OOPZ_LEGACY_SOURCE_ROOT=/app/legacy_oopzbot", dockerfile)
 
+    def test_external_dependencies_do_not_block_degraded_startup(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        compose = (root / "compose.yaml").read_text(encoding="utf-8")
+
+        self.assertNotIn("condition: service_healthy", compose)
+        self.assertGreaterEqual(compose.count("condition: service_started"), 3)
+
     def test_bot_entrypoint_repairs_bind_mount_permissions_before_dropping_root(self) -> None:
         root = Path(__file__).resolve().parents[1]
         dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")

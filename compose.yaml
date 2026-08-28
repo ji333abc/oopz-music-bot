@@ -63,9 +63,9 @@ services:
       RACKNERD_API_HASH: ""
     depends_on:
       qqmusic:
-        condition: service_healthy
+        condition: service_started
       redis:
-        condition: service_healthy
+        condition: service_started
     volumes:
       - ./data:/app/data
     ports:
@@ -100,7 +100,7 @@ services:
       RACKNERD_API_HASH: ${RACKNERD_API_HASH:-}
     depends_on:
       bot:
-        condition: service_healthy
+        condition: service_started
     ports:
       - "${OOPZ_PANEL_BIND:-127.0.0.1}:${OOPZ_PANEL_PORT:-3000}:3000"
     healthcheck:

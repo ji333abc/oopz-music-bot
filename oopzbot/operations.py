@@ -22,6 +22,28 @@ def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+def _sanitize_state(data: dict) -> None:
+    for component in data.get("components", {}).values():
+        if not isinstance(component, dict):
+            continue
+        reason = redact_secrets(
+            component.get("reason") or component.get("message") or "未知原因",
+            max_length=240,
+        )
+        component["reason"] = reason
+        component["message"] = reason
+    for event in data.get("events", []):
+        if not isinstance(event, dict):
+            continue
+        event["message"] = redact_secrets(event.get("message"), max_length=500)
+        event["source"] = redact_secrets(event.get("source"), max_length=80)
+    for job in data.get("jm_jobs", []):
+        if not isinstance(job, dict):
+            continue
+        job["error"] = redact_secrets(job.get("error"), max_length=500)
+        job["requester"] = redact_secrets(job.get("requester"), max_length=80)
+
+
 class OperationsRegistry:
     """保存少量运维状态；配置文件路径后会原子写入持久卷。"""
 
@@ -50,10 +72,19 @@ class OperationsRegistry:
             for key in ("components", "events", "jm_jobs"):
                 if isinstance(value.get(key), type(self._data[key])):
                     self._data[key] = value[key]
+            _sanitize_state(self._data)
+            # Older state files may contain messages written before centralized
+            # redaction existed. Rewrite the sanitized form when possible so a
+            # later backup cannot preserve those historical secret values.
+            try:
+                self._save()
+            except OSError:
+                pass
 
     def _save(self) -> None:
         if self._path is None:
             return
+        _sanitize_state(self._data)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self._path.with_suffix(self._path.suffix + ".tmp")
         temporary.write_text(
@@ -88,10 +119,10 @@ class OperationsRegistry:
     ) -> dict:
         event = {
             "id": uuid4().hex,
-            "type": event_type,
-            "message": str(message)[:500],
-            "level": level,
-            "source": str(source)[:80],
+            "type": redact_secrets(event_type, max_length=80),
+            "message": redact_secrets(message, max_length=500),
+            "level": redact_secrets(level, max_length=20),
+            "source": redact_secrets(source, max_length=80),
             "created_at": _now(),
         }
         with self._lock:
@@ -117,7 +148,7 @@ class OperationsRegistry:
             "page_count": None,
             "archive_bytes": None,
             "error": "",
-            "requester": str(requester)[:80],
+            "requester": redact_secrets(requester, max_length=80),
             "batch_index": batch_index,
             "batch_total": batch_total,
             "started_at": now,
@@ -148,7 +179,11 @@ class OperationsRegistry:
                 return
             for key, value in changes.items():
                 if key in safe_keys:
-                    job[key] = str(value)[:500] if key == "error" else value
+                    job[key] = (
+                        redact_secrets(value, max_length=500)
+                        if key == "error"
+                        else value
+                    )
             job["updated_at"] = _now()
             if job.get("status") in {"completed", "failed", "timeout"}:
                 job["completed_at"] = job["updated_at"]
@@ -157,6 +192,7 @@ class OperationsRegistry:
     def snapshot(self) -> dict:
         with self._lock:
             value = deepcopy(self._data)
+        _sanitize_state(value)
         value["events"] = list(reversed(value["events"][-30:]))
         value["jm_jobs"] = list(reversed(value["jm_jobs"][-30:]))
         return value

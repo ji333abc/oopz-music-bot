@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -22,6 +23,28 @@ class VersionConsistencyTests(unittest.TestCase):
         self.assertIsNotNone(
             re.search(rf"^## \[{re.escape(version)}\]", changelog, flags=re.MULTILINE)
         )
+
+    def test_existing_release_tag_cannot_point_to_another_commit(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        tag = f"v{oopzbot.__version__}"
+        tagged = subprocess.run(
+            ["git", "rev-list", "-n", "1", tag],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if tagged.returncode != 0:
+            self.skipTest(f"开发提交尚未创建 {tag} 标签")
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        self.assertEqual(tagged.stdout.strip(), head.stdout.strip())
 
 
 if __name__ == "__main__":

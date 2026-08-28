@@ -356,7 +356,13 @@ class QueueManager:
 def _try_connect_redis():
     """尝试建立真实 Redis 连接，失败返回 None。"""
     try:
-        client = redis.Redis(**REDIS_CONFIG)
+        connection_config = dict(REDIS_CONFIG)
+        connection_config.setdefault("socket_connect_timeout", 2.0)
+        # The legacy web-command worker uses BLPOP(timeout=2). Keep the socket
+        # timeout above that blocking interval so a healthy empty queue is not
+        # mistaken for a broken Redis connection.
+        connection_config.setdefault("socket_timeout", 5.0)
+        client = redis.Redis(**connection_config)
         client.ping()
         return client
     except Exception as e:
@@ -375,6 +381,14 @@ def get_redis_client(force_reset: bool = False):
     with _redis_lock:
         if force_reset:
             _redis_client = None
+
+        if _redis_client is not None and not isinstance(_redis_client, _InMemoryRedis):
+            try:
+                _redis_client.ping()
+            except Exception as exc:
+                logger.error("Redis 运行中断开，切换到内存队列: %s", exc)
+                _redis_client = _InMemoryRedis()
+                _last_redis_retry = time.time()
 
         if isinstance(_redis_client, _InMemoryRedis):
             now = time.time()

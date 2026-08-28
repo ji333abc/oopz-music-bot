@@ -7,9 +7,11 @@ import hashlib
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import zipfile
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -91,6 +93,39 @@ def _image_manifest(compose_file: Path, redis_service: str) -> list[dict[str, st
     return images
 
 
+_SQLITE_SUFFIXES = {".db", ".sqlite", ".sqlite3"}
+_SQLITE_SIDECAR_SUFFIXES = ("-journal", "-shm", "-wal")
+
+
+def _is_sqlite_database(path: Path) -> bool:
+    if path.suffix.lower() not in _SQLITE_SUFFIXES:
+        return False
+    try:
+        with path.open("rb") as handle:
+            return handle.read(16) == b"SQLite format 3\x00"
+    except OSError:
+        return False
+
+
+def _copy_sqlite_database(source: Path, destination: Path) -> None:
+    """Create a transactionally consistent copy of a live SQLite database."""
+    source_uri = source.resolve().as_uri() + "?mode=ro"
+    # sqlite3.Connection's context manager only controls transactions; it does
+    # not close file handles. Explicit closing is required for Windows backups.
+    with closing(sqlite3.connect(source_uri, uri=True, timeout=10)) as source_db:
+        with closing(sqlite3.connect(destination, timeout=10)) as destination_db:
+            source_db.backup(destination_db)
+    shutil.copystat(source, destination)
+
+
+def _is_sqlite_sidecar(path: Path) -> bool:
+    for suffix in _SQLITE_SIDECAR_SUFFIXES:
+        if path.name.endswith(suffix):
+            database = path.with_name(path.name[: -len(suffix)])
+            return _is_sqlite_database(database)
+    return False
+
+
 def _copy_data(data_dir: Path, stage: Path, excluded: Path) -> list[tuple[str, str]]:
     if not data_dir.exists():
         return []
@@ -99,14 +134,22 @@ def _copy_data(data_dir: Path, stage: Path, excluded: Path) -> list[tuple[str, s
     target = stage / "data"
     files: list[tuple[str, str]] = []
     for source in sorted(data_dir.rglob("*")):
+        if source.is_symlink():
+            raise ValueError(f"数据目录不允许符号链接：{source.relative_to(data_dir)}")
         if not source.is_file() or source.resolve() == excluded:
             continue
         relative = source.relative_to(data_dir)
         if any(part == ".env" or part.startswith(".env.") for part in relative.parts):
             continue
+        if _is_sqlite_sidecar(source):
+            # The online SQLite backup below already includes committed WAL data.
+            continue
         destination = target / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
+        if _is_sqlite_database(source):
+            _copy_sqlite_database(source, destination)
+        else:
+            shutil.copy2(source, destination)
         archive_name = (Path("data") / relative).as_posix()
         files.append((archive_name, sha256_file(destination)))
     return files
@@ -200,10 +243,26 @@ def create_backup(
             newline="\n",
         )
 
-        with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            for source in sorted(stage.rglob("*")):
-                if source.is_file():
-                    archive.write(source, source.relative_to(stage).as_posix())
+        archive_fd, archive_name = tempfile.mkstemp(
+            prefix=f".{output_path.name}.",
+            suffix=".tmp",
+            dir=output_path.parent,
+        )
+        os.close(archive_fd)
+        temporary_archive = Path(archive_name)
+        os.chmod(temporary_archive, 0o600)
+        try:
+            with zipfile.ZipFile(
+                temporary_archive,
+                "w",
+                compression=zipfile.ZIP_DEFLATED,
+            ) as archive:
+                for source in sorted(stage.rglob("*")):
+                    if source.is_file():
+                        archive.write(source, source.relative_to(stage).as_posix())
+            os.replace(temporary_archive, output_path)
+        finally:
+            temporary_archive.unlink(missing_ok=True)
     os.chmod(output_path, 0o600)
     return output_path
 
