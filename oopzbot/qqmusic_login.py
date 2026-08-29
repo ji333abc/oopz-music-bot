@@ -11,9 +11,12 @@ import argparse
 import asyncio
 import json
 import os
+import sys
 import time
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
+from typing import BinaryIO, TextIO
 
 from .qqmusic_credential import (
     CredentialStore,
@@ -25,6 +28,108 @@ from .qqmusic_credential import (
 )
 
 LOGIN_TYPES = {"qq": "QQ", "wx": "WX", "mobile": "MOBILE"}
+
+
+def _finder_score(matrix: list[list[bool]], left: int, top: int) -> tuple[int, int]:
+    """Return matches/total for one standard 7x7 QR finder pattern."""
+    matches = 0
+    total = 0
+    for y in range(7):
+        for x in range(7):
+            expected = x in {0, 6} or y in {0, 6} or (2 <= x <= 4 and 2 <= y <= 4)
+            matches += matrix[top + y][left + x] == expected
+            total += 1
+    return matches, total
+
+
+def _decode_qr_modules(data: bytes | BinaryIO) -> list[list[bool]]:
+    """Recover the logical module grid from a rendered QR image.
+
+    QQMusicApi exposes the QR code as image bytes. Sampling candidate QR sizes and
+    checking their three finder patterns avoids printing hundreds of source-image
+    pixels in the terminal while keeping every logical module intact.
+    """
+    from PIL import Image
+
+    source = BytesIO(data) if isinstance(data, bytes) else data
+    with Image.open(source) as opened:
+        image = opened.convert("L")
+
+    low, high = image.getextrema()
+    if low == high:
+        raise ValueError("二维码图片没有黑白对比")
+    threshold = (low + high) // 2
+    dark_mask = image.point(lambda value: 255 if value < threshold else 0)
+    bbox = dark_mask.getbbox()
+    if bbox is None:
+        raise ValueError("二维码图片中没有深色像素")
+
+    left, top, right, bottom = bbox
+    width = right - left
+    height = bottom - top
+    candidates: list[tuple[float, list[list[bool]]]] = []
+
+    # QR versions 1..40 contain 21, 25, ... 177 modules per side.
+    for size in range(21, 178, 4):
+        matrix = []
+        for y in range(size):
+            py = min(bottom - 1, top + int((y + 0.5) * height / size))
+            row = []
+            for x in range(size):
+                px = min(right - 1, left + int((x + 0.5) * width / size))
+                row.append(image.getpixel((px, py)) < threshold)
+            matrix.append(row)
+
+        matched = total = 0
+        for finder_left, finder_top in ((0, 0), (size - 7, 0), (0, size - 7)):
+            finder_matched, finder_total = _finder_score(matrix, finder_left, finder_top)
+            matched += finder_matched
+            total += finder_total
+
+        # Timing patterns provide a useful tie-breaker for high-version codes.
+        for offset in range(8, size - 8):
+            expected = offset % 2 == 0
+            matched += matrix[6][offset] == expected
+            matched += matrix[offset][6] == expected
+            total += 2
+        candidates.append((matched / total, matrix))
+
+    score, matrix = max(candidates, key=lambda candidate: candidate[0])
+    if score < 0.85:
+        raise ValueError("无法识别二维码模块网格")
+    return matrix
+
+
+def _print_terminal_qr(data: bytes, stream: TextIO | None = None) -> None:
+    """Print a scan-friendly QR code with terminal background colours."""
+    output = stream or sys.stdout
+    matrix = _decode_qr_modules(data)
+    quiet_zone = 4
+    white = "\x1b[107m"
+    black = "\x1b[40m"
+    reset = "\x1b[0m"
+    padded_width = len(matrix) + quiet_zone * 2
+
+    print("\n终端二维码（请直接扫码）：", file=output)
+    white_row = f"{white}{'  ' * padded_width}{reset}"
+    for _ in range(quiet_zone):
+        print(white_row, file=output)
+    for row in matrix:
+        parts = [white, "  " * quiet_zone]
+        active_colour = white
+        for dark in row:
+            colour = black if dark else white
+            if colour != active_colour:
+                parts.append(colour)
+                active_colour = colour
+            parts.append("  ")
+        if active_colour != white:
+            parts.append(white)
+        parts.extend(("  " * quiet_zone, reset))
+        print("".join(parts), file=output)
+    for _ in range(quiet_zone):
+        print(white_row, file=output)
+    print(file=output)
 
 
 def _fmt_ts(ts: float) -> str:
@@ -96,6 +201,11 @@ def cmd_login(args: argparse.Namespace, store: CredentialStore) -> int:
             if qr_path is None:
                 raise RuntimeError("获取二维码失败")
             print(f"二维码已保存: {qr_path.resolve()}")
+            if not args.no_terminal_qr:
+                try:
+                    _print_terminal_qr(qr.data)
+                except Exception as exc:
+                    print(f"[警告] 终端二维码渲染失败({type(exc).__name__})，请打开已保存的图片扫码。")
             if not args.no_open and hasattr(os, "startfile"):
                 os.startfile(qr_path)  # noqa: S606 - 用系统图片查看器打开
                 print("已尝试用系统图片查看器打开二维码。")
@@ -208,6 +318,7 @@ def add_actions(parser: argparse.ArgumentParser) -> None:
     p_login.add_argument("--type", choices=list(LOGIN_TYPES), default="qq")
     p_login.add_argument("--force", action="store_true", help="忽略已有有效凭证，强制重新扫码")
     p_login.add_argument("--no-open", action="store_true", help="不自动打开二维码图片")
+    p_login.add_argument("--no-terminal-qr", action="store_true", help="不在终端显示二维码")
     p_login.add_argument("--timeout", type=int, default=180, help="扫码超时秒数")
     add_common(p_login)
 
