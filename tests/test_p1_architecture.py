@@ -62,6 +62,15 @@ class ArchitectureBoundaryTests(unittest.TestCase):
             for marker in forbidden_calls:
                 self.assertNotIn(marker, source, f"{path.name} contains {marker}")
 
+    def test_bridge_does_not_own_fastapi_routes(self) -> None:
+        imports = _imports(ROOT / "oopzbot" / "bridge.py")
+        self.assertFalse(any(name.startswith("fastapi") for name in imports))
+        route_source = (ROOT / "oopzbot" / "http" / "routes.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('/internal/qqbot/command', route_source)
+        self.assertIn('/internal/panel/snapshot', route_source)
+
     def test_new_packages_import_without_legacy_path_bootstrap(self) -> None:
         modules = (
             "oopzbot.application.command_service",
@@ -70,6 +79,7 @@ class ArchitectureBoundaryTests(unittest.TestCase):
             "oopzbot.commands.registry",
             "oopzbot.domain.contracts",
             "oopzbot.http.validation",
+            "oopzbot.http.routes",
             "oopzbot.infrastructure.queue_adapter",
             "oopzbot.jm.service",
             "oopzbot.qq.reply_policy",

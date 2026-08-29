@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import re
@@ -14,8 +13,6 @@ from pathlib import Path
 from threading import Lock
 
 import requests
-from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
 
 from .application.command_service import CommandService
 from .application.playback_service import PlaybackService
@@ -40,19 +37,12 @@ from .domain.compat import (
     queue_item_to_legacy,
 )
 from .domain.contracts import CommandRequest, PlaybackState
-from .http.security import authorize_bridge_request
-from .http.validation import CommandInputError, command_request_from_http
+from .http.routes import create_bridge_router
 from .infrastructure.queue_adapter import LegacyQueueAdapter
-from .observability import (
-    command_context,
-    current_command_id,
-    ensure_command_id,
-    redact_secrets,
-)
+from .observability import current_command_id, ensure_command_id, redact_secrets
 from .operations import operations
 
 logger = logging.getLogger("QQBotBridge")
-router = APIRouter()
 _music_dependency = None
 
 _command_lock = Lock()
@@ -1392,10 +1382,6 @@ def dispatch_oopz_music_command(
     return True
 
 
-def _bridge_request_allowed(request: Request) -> JSONResponse | None:
-    return authorize_bridge_request(request, get_settings())
-
-
 def _command_event(command: str, result: dict, source: str) -> None:
     if not result.get("ok"):
         return
@@ -1677,76 +1663,17 @@ def _panel_snapshot() -> dict:
     }
 
 
-@router.post("/internal/qqbot/command")
-async def qqbot_command(request: Request):
-    if rejection := _bridge_request_allowed(request):
-        return rejection
-
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse(
-            {"ok": False, "message": "请求体不是有效 JSON"},
-            status_code=400,
-        )
-
-    command_id = ensure_command_id(body.get("command_id"))
-    try:
-        command_request = command_request_from_http(body, command_id=command_id)
-    except CommandInputError as exc:
-        return JSONResponse(
-            {"ok": False, "message": str(exc)},
-            status_code=400,
-        )
-
-    try:
-        with command_context(command_id):
-            result = await asyncio.to_thread(
-                _execute_request,
-                command_request,
-            )
-            result = command_result_to_legacy(result)
-            _command_event(
-                command_request.command,
-                result,
-                command_request.requester_name,
-            )
-        return JSONResponse({**result, "command_id": command_id})
-    except Exception as exc:
-        with command_context(command_id):
-            logger.exception("执行 QQBot 桥接命令失败")
-        return JSONResponse(
-            {
-                "ok": False,
-                "message": f"执行失败: {type(exc).__name__}",
-                "command_id": command_id,
-            },
-            status_code=500,
-        )
-
-
-@router.get("/internal/panel/snapshot")
-async def panel_snapshot(request: Request):
-    if rejection := _bridge_request_allowed(request):
-        return rejection
-    try:
-        return JSONResponse(await asyncio.to_thread(_panel_snapshot))
-    except Exception as exc:
-        logger.exception("生成面板快照失败")
-        return JSONResponse(
-            {"ok": False, "message": f"读取状态失败: {type(exc).__name__}"},
-            status_code=503,
-        )
-
-
-@router.get("/healthz")
-async def healthz():
-    # Liveness must never call QQ, OOPZ, Redis, or any other external service.
-    return {"ok": True, "status": "ok", "music_ready": _music_dependency is not None}
-
-
-@router.get("/readyz")
-async def readyz():
-    """Report whether the bot can process complete business commands."""
-    result = await asyncio.to_thread(_readiness_snapshot)
-    return JSONResponse(result, status_code=200 if result["ok"] else 503)
+(
+    router,
+    qqbot_command,
+    panel_snapshot,
+    healthz,
+    readyz,
+) = create_bridge_router(
+    execute=lambda request: _execute_request(request),
+    record_command=lambda command, result, source: _command_event(command, result, source),
+    panel_snapshot=lambda: _panel_snapshot(),
+    readiness_snapshot=lambda: _readiness_snapshot(),
+    music_ready=lambda: _music_dependency is not None,
+    logger=logger,
+)
