@@ -108,6 +108,11 @@ oopzbot discover --area-id <域ID>
 | `QQ_MUSIC_QUALITY` | `320` | 主音质：`m4a/128/320/ape/flac` |
 | `QQ_MUSIC_FALLBACK_QUALITY` | `128` | 主地址不可用时的音质 |
 
+旧版 Web 播放器通过 `web_token` Cookie 保护完整 `/api/` 接口。若本机 Nginx 只读页面需要长期代理
+`/api/status`、`/api/queue` 和 `/api/lyric`，应在 `.env` 设置独立随机值
+`OOPZ_READONLY_API_TOKEN`，并由 Nginx 使用 `X-OOPZ-Readonly-Token` 请求头传递。该令牌只对这三个
+GET 接口生效，不受播放器 Cookie 的滑动 TTL 或轮换影响，也不得复用其他服务的 Token。
+
 本地安装保持前三项默认值即可。Bot 会验证安装标记、固定提交和四个必需端点，然后在回环地址启动服务；QQ/OOPZ 凭据不会传给该子进程。
 
 只有明确使用自行维护的服务时才设置 `QQ_MUSIC_MANAGED=false` 并修改 `QQ_MUSIC_BASE_URL`。外部服务必须兼容 `/getSearchByKey`、`/getMusicPlay`、`/getSongInfo` 和 `/getLyric`。

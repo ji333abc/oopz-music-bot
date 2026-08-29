@@ -26,6 +26,11 @@ from core.queue_manager import (
     KEY_PLAY_STATE,
     KEY_PLAY_MODE,
 )
+from web.web_api_auth import (
+    READONLY_API_TOKEN_ENV,
+    READONLY_API_TOKEN_HEADER,
+    api_request_authorized,
+)
 from web.web_link_token import get_token, set_token, get_active_area
 
 import web.web_player_config as cfg
@@ -114,7 +119,6 @@ started_at: float = time.time()
 liked_ids_cache: list = []
 
 from core.redis_keys import WEB_COMMANDS as KEY_WEB_COMMANDS, VOLUME as KEY_VOLUME, WEB_TOKEN_COOKIE
-
 # 可选播放模式取值（与 src/music.py 中的 PLAY_MODE_* 常量保持一致）。
 # 注意：autoplay 不是可选模式，仅为队列播完自动续播时的来源标识。
 PLAY_MODE_LIST = "list"
@@ -305,7 +309,14 @@ async def _auth_web_api(request: Request, call_next):
     if path.startswith("/api/"):
         active = get_token(redis_client=get_redis())
         client_token = request.cookies.get(WEB_TOKEN_COOKIE, "")
-        if not active or not secrets.compare_digest(client_token, active):
+        if not api_request_authorized(
+            method=request.method,
+            path=path,
+            cookie_token=client_token,
+            active_cookie_token=active,
+            readonly_token=os.getenv(READONLY_API_TOKEN_ENV, ""),
+            supplied_readonly_token=request.headers.get(READONLY_API_TOKEN_HEADER, ""),
+        ):
             return JSONResponse({"ok": False, "error": "未授权或链接已失效"}, status_code=403)
     if path.startswith("/admin/api/") and path not in {"/admin/api/login"}:
         if not _admin_enabled():
