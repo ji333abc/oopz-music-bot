@@ -48,6 +48,14 @@ def check_config(env_file: str | None = None) -> int:
     music_mode = "固定版本自动托管" if settings.qq_music_managed else "外部服务"
     print(f"- 音乐接口：{settings.qq_music_base_url}（{music_mode}）")
     print(f"- OOPZ 域：{settings.oopz_area_id}")
+    if settings.qq_music_enabled:
+        from .qqmusic_credential import credential_status
+
+        status = credential_status()
+        if status.get("has_credential"):
+            print(f"- QQ 音乐凭证：{status.get('credential_file')}（{status.get('state')}）")
+        else:
+            print("- QQ 音乐凭证：未配置（使用手动 Cookie，可运行 oopzbot qqmusic-login login 启用自动续期）")
     return 0
 
 
