@@ -1425,6 +1425,25 @@ def _service_health(music) -> dict[str, dict]:
                 "error",
                 f"QQ 音乐接口异常：{type(exc).__name__}",
             )
+        from .qqmusic_credential import credential_status
+
+        credential = credential_status()
+        if not credential.get("has_credential"):
+            components["qqmusic_credential"] = _health_entry(
+                "offline", "未配置扫码凭证，使用手动 Cookie"
+            )
+        elif credential.get("state") == "expired":
+            components["qqmusic_credential"] = _health_entry(
+                "degraded", "QQ 音乐凭证已过期，请重新扫码登录"
+            )
+        else:
+            remaining = max(0, float(credential.get("expires_at") or 0) - time.time())
+            days = max(0, int(remaining // 86400))
+            components["qqmusic_credential"] = _health_entry(
+                "ok", f"QQ 音乐凭证有效，剩余约 {days} 天"
+            )
+    else:
+        components["qqmusic_credential"] = _health_entry("offline", "QQ 音乐功能未启用")
 
     jm_enabled = _env("QQBOT_JM_ENABLED").lower() in {"1", "true", "yes", "on"}
     if not jm_enabled:

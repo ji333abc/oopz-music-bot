@@ -97,6 +97,7 @@ const componentNames: Record<string, string> = {
   oopz_voice: "OOPZ 语音",
   redis: "Redis",
   qqmusic: "QQ 音乐",
+  qqmusic_credential: "QQ 音乐凭证",
   qq_bot: "QQ 机器人",
   uploader: "QQ 上传器",
 };
