@@ -53,6 +53,11 @@ class Settings:
 
     log_level: str
     bridge_private_network: bool = False
+    qq_music_credential_file: str = "data/qqmusic-credential.json"
+    qq_music_auto_refresh: bool = True
+    qq_music_refresh_min_hours: int = 6
+    qq_music_refresh_max_hours: int = 24
+    qq_music_cookie_api_url: str = ""
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -78,6 +83,14 @@ class Settings:
             qq_music_cookie=_text("QQ_MUSIC_COOKIE"),
             qq_music_quality=_text("QQ_MUSIC_QUALITY", "320"),
             qq_music_fallback_quality=_text("QQ_MUSIC_FALLBACK_QUALITY", "128"),
+            qq_music_credential_file=_text(
+                "QQ_MUSIC_CREDENTIAL_FILE",
+                "data/qqmusic-credential.json",
+            ),
+            qq_music_auto_refresh=_boolean("QQ_MUSIC_AUTO_REFRESH", True),
+            qq_music_refresh_min_hours=_integer("QQ_MUSIC_REFRESH_MIN_HOURS", 6),
+            qq_music_refresh_max_hours=_integer("QQ_MUSIC_REFRESH_MAX_HOURS", 24),
+            qq_music_cookie_api_url=_text("QQ_MUSIC_COOKIE_API_URL"),
             log_level=_text("LOG_LEVEL", "INFO").upper(),
             bridge_private_network=_boolean(
                 "OOPZBOT_BRIDGE_PRIVATE_NETWORK",
@@ -145,6 +158,10 @@ class Settings:
                 errors.append("托管 QQ 音乐 API 时必须配置 QQ_MUSIC_SERVICE_DIR")
         if self.qq_music_quality not in {"m4a", "128", "320", "ape", "flac"}:
             errors.append("QQ_MUSIC_QUALITY 不是支持的音质")
+        if self.qq_music_refresh_min_hours < 1 or self.qq_music_refresh_max_hours < 1:
+            errors.append("QQ_MUSIC_REFRESH_MIN/MAX_HOURS 必须 >= 1")
+        elif self.qq_music_refresh_min_hours > self.qq_music_refresh_max_hours:
+            errors.append("QQ_MUSIC_REFRESH_MIN_HOURS 不能大于 MAX_HOURS")
         return errors
 
 

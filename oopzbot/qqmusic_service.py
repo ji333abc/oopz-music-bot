@@ -14,6 +14,7 @@ import requests
 
 from .config import Settings
 from .process_env import minimal_child_environment
+from .qqmusic_credential import current_cookie
 
 logger = logging.getLogger("QQMusicService")
 
@@ -28,6 +29,8 @@ QQMUSIC_REQUIRED_ENDPOINTS = {
     "getSongInfo",
     "getLyric",
 }
+# launcher 热更新端点的默认端口（主服务端口 + 1）。
+QQMUSIC_COOKIE_API_PORT_OFFSET = 1
 
 
 def service_directory(value: str) -> Path:
@@ -81,9 +84,21 @@ class ManagedQQMusicService:
         self.enabled = settings.qq_music_enabled and settings.qq_music_managed
         self.base_url = settings.qq_music_base_url.rstrip("/")
         self.directory = service_directory(settings.qq_music_service_dir)
-        self.cookie = str(getattr(settings, "qq_music_cookie", "") or "").strip()
+        # 自动续期发布的 Cookie 优先，QQ_MUSIC_COOKIE 只是手动兜底。
+        self.cookie = current_cookie(settings.qq_music_cookie)
+        self.cookie_api_token = settings.bridge_token
         self.timeout = timeout
         self.process: subprocess.Popen | None = None
+
+    @property
+    def cookie_api_url(self) -> str:
+        """launcher 热更新端点地址（主服务回环地址 + 偏移端口）。"""
+        parsed = urlsplit(self.base_url)
+        host = "127.0.0.1" if parsed.hostname in {"0.0.0.0", "::"} else (
+            parsed.hostname or "127.0.0.1"
+        )
+        port = (parsed.port or 80) + QQMUSIC_COOKIE_API_PORT_OFFSET
+        return f"http://{host}:{port}"
 
     def _compatible_service_is_ready(self) -> bool:
         try:
@@ -122,9 +137,13 @@ class ManagedQQMusicService:
             PORT=str(port),
             QQ_MUSIC_HOST=host,
         )
-        cookie = str(getattr(self, "cookie", "") or "").strip()
+        cookie = current_cookie(getattr(self, "cookie", "") or "")
         if cookie:
             child_env["QQ_MUSIC_COOKIE"] = cookie
+        if self.cookie_api_token:
+            child_env["QQ_MUSIC_COOKIE_API_PORT"] = str(port + QQMUSIC_COOKIE_API_PORT_OFFSET)
+            child_env["QQ_MUSIC_COOKIE_API_TOKEN"] = self.cookie_api_token
+        self.cookie = cookie
         self.process = subprocess.Popen(
             [node, str(launcher), str(self.directory)],
             cwd=self.directory,
@@ -148,6 +167,17 @@ class ManagedQQMusicService:
 
         self.close()
         raise RuntimeError(f"QQ 音乐 API 在 {self.timeout:g} 秒内未就绪：{self.base_url}")
+
+    def restart(self, cookie: str = "") -> None:
+        """用新的 Cookie 重启托管的 QQ 音乐 API 子进程（热更新失败时的兜底）。"""
+        if not self.enabled:
+            return
+        if cookie:
+            self.cookie = cookie.strip()
+        was_running = self.process is not None
+        self.close()
+        if was_running:
+            self.start()
 
     def close(self) -> None:
         process, self.process = self.process, None

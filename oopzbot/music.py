@@ -10,6 +10,7 @@ import logging
 import requests
 
 from .config import Settings, get_settings
+from .qqmusic_credential import current_cookie
 
 logger = logging.getLogger("QQMusic")
 HTTP_TIMEOUT_DEFAULT = 20
@@ -29,6 +30,7 @@ class QQMusic:
         settings = settings or get_settings()
         self.enabled = settings.qq_music_enabled
         self.base_url = settings.qq_music_base_url.rstrip("/")
+        # 启动时的静态值仅作兜底；自动续期发布新 Cookie 后由 current_cookie 接管。
         self.cookie = settings.qq_music_cookie
         self.quality = self._normalize_quality(
             settings.qq_music_quality,
@@ -55,8 +57,9 @@ class QQMusic:
         self.last_error = None
         try:
             headers = {}
-            if self.cookie:
-                headers["Cookie"] = self.cookie
+            cookie = current_cookie(self.cookie)
+            if cookie:
+                headers["Cookie"] = cookie
             response = self._session.get(
                 f"{self.base_url}{path}",
                 params=params,

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Optional
 
@@ -21,6 +22,40 @@ _SUPPORTED_QUALITIES = {"m4a", "128", "320", "ape", "flac"}
 
 
 _cached_config: dict | None = None
+
+# 自动续期发布的 Cookie 状态文件缓存：(路径, mtime, cookie)。
+_cookie_cache: tuple[str, float | None, str] = ("", None, "")
+
+
+def _cookie_state_path() -> str:
+    configured = os.getenv("QQ_MUSIC_COOKIE_STATE_FILE", "").strip()
+    if configured:
+        return configured
+    credential_file = os.getenv("QQ_MUSIC_CREDENTIAL_FILE", "").strip() or (
+        "data/qqmusic-credential.json"
+    )
+    return os.path.join(os.path.dirname(credential_file), "qqmusic-cookie.json")
+
+
+def _current_cookie(fallback: str) -> str:
+    """自动续期发布的新 Cookie 优先；状态文件缺失时回退启动时的静态值。"""
+    global _cookie_cache
+    path = _cookie_state_path()
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        _cookie_cache = (path, None, "")
+        return fallback
+    if _cookie_cache[0] == path and _cookie_cache[1] == mtime:
+        return _cookie_cache[2] or fallback
+    try:
+        with open(path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+        cookie = str(payload.get("cookie") or "").strip()
+    except (OSError, ValueError):
+        cookie = ""
+    _cookie_cache = (path, mtime, cookie)
+    return cookie or fallback
 
 
 def _load_config() -> dict:
@@ -71,8 +106,9 @@ class QQMusic:
             return None
         try:
             headers = {}
-            if self.cookie:
-                headers["Cookie"] = self.cookie
+            cookie = _current_cookie(self.cookie)
+            if cookie:
+                headers["Cookie"] = cookie
             response = self._session.get(
                 f"{self.base_url}{path}",
                 params=params,
