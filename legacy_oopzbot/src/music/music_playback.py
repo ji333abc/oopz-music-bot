@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 import uuid
-import threading
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from config import WEB_PLAYER_CONFIG
+from core.database import SongCache, Statistics
 from core.http_constants import HTTP_TIMEOUT_PROBE
 from core.logger_config import get_logger
 from web.web_link_token import ensure_token
-from core.database import SongCache, Statistics
 
 if TYPE_CHECKING:
     pass
@@ -137,16 +137,23 @@ def _web_player_link(redis_client=None) -> str:
 class PlaybackMixin:
     """播放相关逻辑的 Mixin，供 MusicHandler 等使用"""
 
-    def auto_play_monitor(self):
+    def auto_play_monitor(self, stop_event=None):
         """定期检查播放状态，自动播放下一首（基于歌曲时长判断是否播完）"""
-        while True:
+        def wait_or_stop(seconds):
+            if stop_event is None:
+                time.sleep(seconds)
+                return False
+            return stop_event.wait(seconds)
+
+        while stop_event is None or not stop_event.is_set():
             try:
                 is_playing = self._is_playing()
 
                 if not is_playing:
                     with self._playback_lock:
                         if self._is_playing():
-                            time.sleep(_AUTO_PLAY_CHECK_INTERVAL)
+                            if wait_or_stop(_AUTO_PLAY_CHECK_INTERVAL):
+                                break
                             continue
 
                         current = self.queue.get_current()
@@ -165,7 +172,8 @@ class PlaybackMixin:
                         queue_length = self.queue.get_queue_length()
                         if (queue_length > 0 or finished_song is not None) and current is None:
                             if not self._voice_channel_id:
-                                time.sleep(2)
+                                if wait_or_stop(2):
+                                    break
                                 continue
                             dequeue_next = getattr(self, "_dequeue_next_song", None)
                             if callable(dequeue_next):
@@ -190,7 +198,8 @@ class PlaybackMixin:
                                         self.queue.redis.lpush(self.queue._qkey(), json.dumps(next_song, ensure_ascii=False))
                                     except Exception as e:
                                         logger.error(f"自动播放回退入队失败，歌曲可能丢失: {e}")
-                                    time.sleep(2)
+                                    if wait_or_stop(2):
+                                        break
                                     continue
 
                                 play_uuid = str(uuid.uuid4())
@@ -234,7 +243,8 @@ class PlaybackMixin:
                                         area=ar,
                                     )
 
-                                time.sleep(_PLAY_FADE_DELAY)
+                                if wait_or_stop(_PLAY_FADE_DELAY):
+                                    break
                         elif queue_length == 0 and current is None and self._voice_channel_id:
                             grace = time.time() - self._voice_enter_time < 30
                             if not grace:
@@ -242,11 +252,13 @@ class PlaybackMixin:
                                 self._leave_current_voice_channel()
 
                 self._release_web_link_if_needed()
-                time.sleep(_AUTO_PLAY_CHECK_INTERVAL)
+                if wait_or_stop(_AUTO_PLAY_CHECK_INTERVAL):
+                    break
 
             except Exception as e:
                 logger.error(f"自动播放监控出错: {e}")
-                time.sleep(_PLAY_FADE_DELAY)
+                if wait_or_stop(_PLAY_FADE_DELAY):
+                    break
 
     def _resolve_fallback_audio_url(self, song_data: dict, default_url: str) -> str:
         """获取 Python 备用下载地址；QQ音乐可使用独立的低码率链接。"""

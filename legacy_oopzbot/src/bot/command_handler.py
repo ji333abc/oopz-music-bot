@@ -42,6 +42,9 @@ class CommandHandler:
     def recent_messages(self):
         return self._runtime.recent_messages
 
+    def bind_external_music_command(self, handler) -> None:
+        self._runtime.bind_external_music_command(handler)
+
     def handle_message(self, msg_data: dict):
         ctx = self.services.routing.message.build_context(msg_data)
         # 先记录消息，再路由，撤回类命令才能立刻命中。

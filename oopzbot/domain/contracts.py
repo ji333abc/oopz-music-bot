@@ -52,6 +52,10 @@ class CommandRequest:
     group_openid: str = ""
     source: str = "unknown"
     command_id: str | None = None
+    area_id: str = ""
+    text_channel_id: str = ""
+    voice_channel_id: str = ""
+    bot_user_id: str = ""
 
     @property
     def requester_key(self) -> str:

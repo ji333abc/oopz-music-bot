@@ -174,6 +174,13 @@ class MentionCommandRouter:
             self._runtime.plugin_host,
         ):
             return False
+        dispatch_external = getattr(
+            self._runtime,
+            "dispatch_external_music_command",
+            None,
+        )
+        if callable(dispatch_external) and dispatch_external(text, channel, area, user):
+            return False
         if self._services.interaction.music.handle_mention(text, channel, area, user):
             return False
 

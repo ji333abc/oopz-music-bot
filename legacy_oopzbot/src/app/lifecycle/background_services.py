@@ -1,10 +1,9 @@
 import threading
 
+from app.lifecycle.context import AppContext
 from core.logger_config import setup_logger
 from web import web_player_config as web_cfg
 from web.web_player import run_server as run_web_player
-
-from app.lifecycle.context import AppContext
 
 logger = setup_logger("BackgroundServices")
 
@@ -12,9 +11,9 @@ logger = setup_logger("BackgroundServices")
 class BackgroundServiceRunner:
     """负责启动命令链路依赖的后台线程与监听器。"""
 
-    def start(self, context: AppContext) -> None:
+    def start(self, context: AppContext, *, start_music_monitor: bool = True) -> None:
         self._start_onebot_v11(context)
-        self._start_music_services(context)
+        self._start_music_services(context, start_monitor=start_music_monitor)
         self._start_web_player(context)
         self._start_scheduler_services(context)
 
@@ -24,14 +23,17 @@ class BackgroundServiceRunner:
         context.onebot_v11.start()
         logger.info("OneBot v11 旁路服务已启动。")
 
-    def _start_music_services(self, context: AppContext) -> None:
+    def _start_music_services(self, context: AppContext, *, start_monitor: bool) -> None:
         music = context.handler.infrastructure.music
-        threading.Thread(
-            target=music.auto_play_monitor,
-            daemon=True,
-        ).start()
+        if start_monitor:
+            threading.Thread(
+                target=music.auto_play_monitor,
+                daemon=True,
+            ).start()
+            logger.info("自动播放监控已启动。")
+        else:
+            logger.info("自动播放监控由现代 PlaybackMonitorService 接管。")
         music.start_web_command_listener()
-        logger.info("自动播放监控已启动。")
 
     def _start_web_player(self, context: AppContext) -> None:
         from web.web_player import register_runtime_dependencies, set_oopz_client, set_sender

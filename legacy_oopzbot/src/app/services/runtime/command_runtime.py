@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Iterator, Protocol
+from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING, Any, Protocol
 
 from app.infrastructure import BotInfrastructure, PluginHost
-
 
 if TYPE_CHECKING:
     from app.services.registry import CommandServiceRegistry
@@ -58,7 +58,7 @@ class ServiceRegistryProxy:
     def __init__(self) -> None:
         self._target: CommandServiceRegistry | None = None
 
-    def bind(self, target: "CommandServiceRegistry") -> None:
+    def bind(self, target: CommandServiceRegistry) -> None:
         self._target = target
 
     def __getattr__(self, name: str):
@@ -104,6 +104,7 @@ class CommandRuntime:
         self.bot_mention = bot_mention
         self._recent_messages = RecentMessageStore()
         self._plugin_host: PluginHost | None = None
+        self._external_music_command: Callable[[str, str, str, str], bool] | None = None
 
     @property
     def sender(self):
@@ -132,11 +133,29 @@ class CommandRuntime:
     def recent_messages(self) -> RecentMessageStore:
         return self._recent_messages
 
-    def bind_services(self, services: "CommandServiceRegistry") -> None:
+    def bind_services(self, services: CommandServiceRegistry) -> None:
         self.services.bind(services)
 
     def bind_plugin_host(self, plugin_host: PluginHost) -> None:
         self._plugin_host = plugin_host
+
+    def bind_external_music_command(
+        self,
+        handler: Callable[[str, str, str, str], bool] | None,
+    ) -> None:
+        """Bind the modern music command boundary after both runtimes start."""
+
+        self._external_music_command = handler
+
+    def dispatch_external_music_command(
+        self,
+        text: str,
+        channel: str,
+        area: str,
+        user: str,
+    ) -> bool:
+        handler = self._external_music_command
+        return bool(handler and handler(text, channel, area, user))
 
 
 def sender_of(runtime_view):

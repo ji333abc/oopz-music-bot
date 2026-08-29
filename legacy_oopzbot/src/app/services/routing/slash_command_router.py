@@ -157,6 +157,13 @@ class SlashCommandRouter:
 
         if not raw and self._dispatch_exact(command, slash_of("help"), lambda: self._actions.interaction.show_help(channel, area, user)):
             return
+        dispatch_external = getattr(
+            self._runtime,
+            "dispatch_external_music_command",
+            None,
+        )
+        if callable(dispatch_external) and dispatch_external(content, channel, area, user):
+            return
         if self._services.interaction.music.handle_slash(command, subcommand, arg, parts, channel, area, user):
             return
 

@@ -21,7 +21,12 @@ from .application.command_service import CommandService
 from .application.playback_service import PlaybackService
 from .application.queue_service import QueuePositionError, QueueService
 from .commands.formatter import format_queue, format_search, format_seconds
+from .commands.oopz import backend_notifies as _oopz_backend_notifies
+from .commands.oopz import normalize_oopz_music_command as _modern_oopz_music_command
 from .commands.parser import (
+    matches_play_command,
+    matches_search_command,
+    parse_platform_keyword,
     parse_queue_positions,
     play_keyword,
     search_keyword,
@@ -516,17 +521,18 @@ def set_music_handler(handler) -> None:
     _music_dependency = handler
 
 
-def _command_config() -> tuple[str, str, str, str]:
+def _command_config(request: CommandRequest | None = None) -> tuple[str, str, str, str]:
     settings = get_settings()
-    bot_user = settings.oopz_person_uid
+    bot_user = request.bot_user_id if request else ""
+    bot_user = bot_user or settings.oopz_person_uid
     handler = _music_handler()
     runtime_bot = getattr(getattr(handler, "runtime", None), "bot", None)
     if not bot_user and runtime_bot is not None:
         bot_user = str(getattr(getattr(runtime_bot, "config", None), "person_uid", "") or "")
     return (
-        settings.oopz_area_id,
-        settings.oopz_text_channel_id,
-        settings.oopz_voice_channel_id,
+        (request.area_id if request else "") or settings.oopz_area_id,
+        (request.text_channel_id if request else "") or settings.oopz_text_channel_id,
+        (request.voice_channel_id if request else "") or settings.oopz_voice_channel_id,
         bot_user,
     )
 
@@ -927,17 +933,23 @@ def _search_keyword(command: str) -> str:
     return search_keyword(command)
 
 
-def _search_songs(music, keyword: str, requester_key: str) -> dict:
+def _search_songs(
+    music,
+    keyword: str,
+    requester_key: str,
+    *,
+    platform: str = "qq",
+) -> dict:
     if not keyword:
         return {"ok": False, "message": "请输入关键词，例如：搜歌 搁浅"}
     if len(keyword) > 100:
         return {"ok": False, "message": "搜索关键词过长"}
 
-    results = music.search_candidates(keyword, "qq", limit=10)
+    results = music.search_candidates(keyword, platform, limit=10)
     if not results:
         return {"ok": False, "message": f"QQ音乐未找到：{keyword}"}
 
-    songs = [dict(song, platform="qq") for song in results[:10]]
+    songs = [dict(song, platform=platform) for song in results[:10]]
     _search_sessions.put(requester_key, songs=songs)
     candidates = tuple(display_song_from_legacy(song) for song in songs)
     return {
@@ -959,6 +971,7 @@ def _select_song(
     text_channel: str,
     voice_channel: str,
     bot_user: str,
+    ensure_voice: bool = True,
 ) -> dict:
     session = _search_sessions.get_active(requester_key)
     if not session:
@@ -970,7 +983,7 @@ def _select_song(
 
     current_channel = getattr(music, "_voice_channel_id", None)
     current_area = getattr(music, "_voice_channel_area", None)
-    if current_channel != voice_channel or current_area != area:
+    if ensure_voice and (current_channel != voice_channel or current_area != area):
         result = music.enter_voice_channel(voice_channel, area)
         if not isinstance(result, dict) or result.get("error"):
             detail = result.get("error") if isinstance(result, dict) else "unknown"
@@ -994,18 +1007,21 @@ def _select_song(
     }
 
 
-def _execute_command_impl(command: str, requester_key: str) -> dict:
+def _execute_command_impl(request: CommandRequest) -> dict:
     with _command_lock:
+        command = request.command
+        requester_key = request.requester_key
         music = _music_handler()
         if music is None:
             return {"ok": False, "message": "Oopzbot 音乐模块尚未初始化"}
 
-        area, text_channel, voice_channel, bot_user = _command_config()
+        area, text_channel, voice_channel, bot_user = _command_config(request)
         if not all((area, text_channel, voice_channel, bot_user)):
             return {
                 "ok": False,
                 "message": "QQBot 的 Oopz 域、文字频道、语音频道或机器人用户 ID 尚未配置",
             }
+        music_requester = request.requester_id if request.source == "oopz" else bot_user
 
         command_kind = exact_command_kind(command)
 
@@ -1089,9 +1105,17 @@ def _execute_command_impl(command: str, requester_key: str) -> dict:
                 "message": "未找到该榜单，请发送“排行榜”查看可用榜单",
             }
 
-        search_keyword = _search_keyword(command)
-        if search_keyword:
-            return _search_songs(music, search_keyword, requester_key)
+        search_value = _search_keyword(command)
+        if matches_search_command(command):
+            platform, search_value = parse_platform_keyword(search_value)
+            if not search_value:
+                return {"ok": False, "message": "请输入关键词，例如：搜歌 搁浅"}
+            return _search_songs(
+                music,
+                search_value,
+                requester_key,
+                platform=platform,
+            )
 
         selection_match = re.fullmatch(r"(?:选歌|选择)\s*(\d+)", command)
         if selection_match:
@@ -1102,17 +1126,23 @@ def _execute_command_impl(command: str, requester_key: str) -> dict:
                 area=area,
                 text_channel=text_channel,
                 voice_channel=voice_channel,
-                bot_user=bot_user,
+                bot_user=music_requester,
+                ensure_voice=request.source != "oopz",
             )
 
-        keyword = _play_keyword(command)
-        if keyword:
+        play_value = _play_keyword(command)
+        if matches_play_command(command):
+            platform, keyword = parse_platform_keyword(play_value)
+            if not keyword:
+                return {"ok": False, "message": "请输入歌名，例如：播放 海阔天空"}
             if len(keyword) > 100:
                 return {"ok": False, "message": "歌曲关键词过长"}
 
             current_channel = getattr(music, "_voice_channel_id", None)
             current_area = getattr(music, "_voice_channel_area", None)
-            if current_channel != voice_channel or current_area != area:
+            if request.source != "oopz" and (
+                current_channel != voice_channel or current_area != area
+            ):
                 result = music.enter_voice_channel(voice_channel, area)
                 if not isinstance(result, dict):
                     return {"ok": False, "message": "进入 Oopz 语音频道失败"}
@@ -1125,10 +1155,10 @@ def _execute_command_impl(command: str, requester_key: str) -> dict:
 
             play_result = _playback_service(music).play_keyword(
                 keyword,
-                platform="qq",
+                platform=platform,
                 channel=text_channel,
                 area=area,
-                requester_id=bot_user,
+                requester_id=music_requester,
             )
             if not play_result.ok:
                 return {"ok": False, "message": play_result.message}
@@ -1141,7 +1171,7 @@ def _execute_command_impl(command: str, requester_key: str) -> dict:
             result = _playback_service(music).next(
                 channel=text_channel,
                 area=area,
-                requester_id=bot_user,
+                requester_id=music_requester,
             )
             return {"ok": result.ok, "message": result.message}
 
@@ -1204,6 +1234,49 @@ def _execute_command_impl(command: str, requester_key: str) -> dict:
             music._play_start_time = resumed_start_time
             return {"ok": True, "message": "已继续播放"}
 
+        liked_selection = re.fullmatch(r"喜欢点歌\s+(\d+)", command)
+        if liked_selection:
+            result = _playback_service(music).play_liked_by_index(
+                int(liked_selection.group(1)),
+                channel=text_channel,
+                area=area,
+                requester_id=music_requester,
+            )
+            return {"ok": result.ok, "message": result.message}
+
+        liked_list = re.fullmatch(r"喜欢列表(?:\s+(\d+))?", command)
+        if liked_list:
+            page = max(1, int(liked_list.group(1) or 1))
+            result = _playback_service(music).show_liked(
+                page,
+                channel=text_channel,
+                area=area,
+            )
+            return {"ok": result.ok, "message": result.message}
+
+        liked_random = re.fullmatch(
+            r"(?:随机|随机播放|喜欢|随便来一首)(?:\s+(\d+))?",
+            command,
+        )
+        if liked_random:
+            count = max(1, min(int(liked_random.group(1) or 1), 20))
+            result = _playback_service(music).play_liked(
+                channel=text_channel,
+                area=area,
+                requester_id=music_requester,
+                count=count,
+            )
+            return {"ok": result.ok, "message": result.message}
+
+        if command == "喜欢用法":
+            return {
+                "ok": False,
+                "message": (
+                    "用法：/like、/like <数量>、/like list [页码]、"
+                    "/like play <编号>"
+                ),
+            }
+
         if command_kind is CommandKind.VOICE_CHANNELS:
             return {
                 "ok": True,
@@ -1245,8 +1318,7 @@ def _execute_command(
     """Compatibility export for callers that still consume dictionaries."""
 
     requested_command_id = command_id or current_command_id()
-    service = CommandService(_execute_command_impl, logger=logger)
-    result = service.execute(
+    result = _execute_request(
         CommandRequest(
             command=command,
             requester_id=requester_key,
@@ -1261,6 +1333,63 @@ def _execute_command(
     if command_id is None:
         payload.pop("command_id", None)
     return payload
+
+
+def _execute_request(request: CommandRequest):
+    service = CommandService(_execute_command_impl, logger=logger)
+    return service.execute(request)
+
+
+def dispatch_oopz_music_command(
+    command: str,
+    text_channel: str,
+    area: str,
+    requester_id: str,
+) -> bool:
+    """Execute one OOPZ mention through the shared modern command service.
+
+    The legacy backend still emits its established play/next/stop messages.
+    Read-only and state-only commands are rendered here because they have no
+    backend notification side effect.
+    """
+
+    normalized = _modern_oopz_music_command(command)
+    if normalized is None:
+        return False
+
+    command_id = ensure_command_id(None)
+    request = CommandRequest(
+        command=normalized,
+        requester_id=requester_id or "anonymous",
+        group_openid=area,
+        source="oopz",
+        command_id=command_id,
+        area_id=area,
+        text_channel_id=text_channel,
+    )
+    try:
+        result = _execute_request(request)
+    except Exception:
+        logger.exception("OOPZ 音乐命令执行失败 command=%r", normalized)
+        _notify_music(
+            _music_handler(),
+            text="音乐命令执行失败，请稍后重试",
+            channel=text_channel,
+            area=area,
+        )
+        return True
+    payload = command_result_to_legacy(result)
+    _command_event(normalized, payload, "OOPZ")
+
+    if not _oopz_backend_notifies(normalized):
+        music = _music_handler()
+        _notify_music(
+            music,
+            text=payload.get("message") or "命令执行完成",
+            channel=text_channel,
+            area=area,
+        )
+    return True
 
 
 def _bridge_request_allowed(request: Request) -> JSONResponse | None:
@@ -1485,6 +1614,16 @@ def _readiness_snapshot() -> dict:
             "implementation_name",
             type(runtime).__name__ if runtime is not None else "uninitialized",
         ),
+        "command_implementation": getattr(
+            runtime,
+            "command_implementation",
+            "uninitialized",
+        ),
+        "playback_monitor_implementation": getattr(
+            runtime,
+            "playback_monitor_implementation",
+            "uninitialized",
+        ),
     }
 
 
@@ -1524,6 +1663,16 @@ def _panel_snapshot() -> dict:
             "implementation_name",
             type(runtime).__name__ if runtime is not None else "uninitialized",
         ),
+        "command_implementation": getattr(
+            runtime,
+            "command_implementation",
+            "uninitialized",
+        ),
+        "playback_monitor_implementation": getattr(
+            runtime,
+            "playback_monitor_implementation",
+            "uninitialized",
+        ),
         "updated_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
 
@@ -1553,11 +1702,10 @@ async def qqbot_command(request: Request):
     try:
         with command_context(command_id):
             result = await asyncio.to_thread(
-                _execute_command,
-                command_request.command,
-                command_request.requester_key,
-                command_id,
+                _execute_request,
+                command_request,
             )
+            result = command_result_to_legacy(result)
             _command_event(
                 command_request.command,
                 result,

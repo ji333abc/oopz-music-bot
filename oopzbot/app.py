@@ -108,7 +108,7 @@ def discover_channels(
 
 def run(env_file: str | None = None) -> int:
     _load_environment(env_file)
-    from .bridge import router, set_music_handler
+    from .bridge import dispatch_oopz_music_command, router, set_music_handler
     from .config import clear_settings_cache, get_settings
     from .controller import MusicController
     from .qqmusic_credential import (
@@ -166,6 +166,8 @@ def run(env_file: str | None = None) -> int:
             raise
         controller = MusicController(settings, runtime)
     set_music_handler(controller)
+    if legacy_core_enabled:
+        runtime.bind_music_command_handler(dispatch_oopz_music_command)
 
     refresh_service = None
     if settings.qq_music_enabled and settings.qq_music_auto_refresh:

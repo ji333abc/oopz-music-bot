@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import unittest
 from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+from oopzbot.application.playback_monitor_service import PlaybackMonitorService
 from oopzbot.application.playback_service import PlaybackService
 from oopzbot.application.queue_service import QueuePositionError, QueueService
 from oopzbot.domain.compat import queue_item_from_legacy, queue_item_to_legacy
@@ -114,6 +116,72 @@ class PlaybackServiceTests(unittest.TestCase):
         self.assertFalse(failure.ok)
         self.assertEqual(failure.error.stage, "playing")
 
+    def test_liked_commands_are_owned_by_playback_service(self) -> None:
+        calls = []
+        backend = SimpleNamespace(
+            play_liked=lambda channel, area, user, count: calls.append(
+                ("random", channel, area, user, count)
+            ),
+            play_liked_by_index=lambda index, channel, area, user: calls.append(
+                ("pick", index, channel, area, user)
+            ),
+            show_liked_list=lambda channel, area, page: calls.append(
+                ("list", channel, area, page)
+            ),
+        )
+        service = PlaybackService(backend)
+
+        self.assertTrue(
+            service.play_liked(
+                channel="text",
+                area="area",
+                requester_id="user",
+                count=3,
+            ).ok
+        )
+        self.assertTrue(
+            service.play_liked_by_index(
+                2,
+                channel="text",
+                area="area",
+                requester_id="user",
+            ).ok
+        )
+        self.assertTrue(service.show_liked(4, channel="text", area="area").ok)
+        self.assertEqual(
+            calls,
+            [
+                ("random", "text", "area", "user", 3),
+                ("pick", 2, "text", "area", "user"),
+                ("list", "text", "area", 4),
+            ],
+        )
+
+
+class PlaybackMonitorServiceTests(unittest.TestCase):
+    def test_monitor_has_one_owner_and_stops_cooperatively(self) -> None:
+        class Backend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.started = threading.Event()
+
+            def auto_play_monitor(self, stop_event=None) -> None:
+                self.calls += 1
+                self.started.set()
+                stop_event.wait(2)
+
+        backend = Backend()
+        service = PlaybackMonitorService(backend)
+
+        service.start()
+        self.assertTrue(backend.started.wait(1))
+        service.start()
+        self.assertEqual(backend.calls, 1)
+        self.assertTrue(service.running)
+
+        service.stop(timeout=1)
+        self.assertFalse(service.running)
+
 
 class ReplyPolicyTests(unittest.IsolatedAsyncioTestCase):
     async def test_policy_bounds_proactive_permission_failure(self) -> None:
@@ -160,6 +228,9 @@ class _FakeMusic:
         self._voice_channel_area = area
         return {"ok": True}
 
+    def auto_play_monitor(self, stop_event=None):
+        return None
+
 
 class _FakeLegacyCore:
     def __init__(self, *, authenticated=True) -> None:
@@ -200,6 +271,22 @@ class RuntimeAdapterTests(unittest.TestCase):
         adapter = LegacyOopzRuntimeAdapter(_FakeLegacyCore())
         self.assertTrue(adapter.start().ok)
         self.assertEqual(adapter.bot.config.person_uid, "legacy-person-uid")
+
+    def test_adapter_exposes_explicit_application_owners(self) -> None:
+        core = _FakeLegacyCore()
+        bind = Mock()
+        core.context.handler = SimpleNamespace(bind_external_music_command=bind)
+        adapter = LegacyOopzRuntimeAdapter(core)
+        self.assertEqual(adapter.command_implementation, "legacy-music-command-fallback")
+        self.assertEqual(adapter.playback_monitor_implementation, "playback-monitor-service")
+        self.assertTrue(adapter.start().ok)
+
+        def handler(*_args):
+            return True
+
+        adapter.bind_music_command_handler(handler)
+        bind.assert_called_once_with(handler)
+        self.assertEqual(adapter.command_implementation, "shared-command-service")
 
     def test_unstarted_adapter_returns_structured_operation_failure(self) -> None:
         adapter = LegacyOopzRuntimeAdapter(_FakeLegacyCore())

@@ -39,6 +39,154 @@ class OopzMessageCallbackTests(unittest.TestCase):
             ],
         )
 
+    def test_modern_music_boundary_preempts_legacy_music_parser(self) -> None:
+        from oopzbot.legacy_runtime import _install_legacy_import_paths
+
+        _install_legacy_import_paths()
+        from app.services.routing.mention_command_router import MentionCommandRouter
+
+        modern = Mock(return_value=True)
+        legacy = Mock(return_value=True)
+        plugins = types.SimpleNamespace(try_dispatch_mention=Mock(return_value=False))
+        runtime = types.SimpleNamespace(
+            dispatch_external_music_command=modern,
+            services=types.SimpleNamespace(
+                interaction=types.SimpleNamespace(music=types.SimpleNamespace(handle_mention=legacy)),
+            ),
+            plugin_host=object(),
+        )
+        router = object.__new__(MentionCommandRouter)
+        router._runtime = runtime
+        router._services = runtime.services
+        router._plugins = plugins
+
+        self.assertFalse(router.dispatch("停止", "channel", "area", "user"))
+        modern.assert_called_once_with("停止", "channel", "area", "user")
+        legacy.assert_not_called()
+
+    def test_modern_music_boundary_preempts_legacy_slash_parser(self) -> None:
+        from oopzbot.legacy_runtime import _install_legacy_import_paths
+
+        _install_legacy_import_paths()
+        from app.services.routing.slash_command_router import SlashCommandRouter
+
+        modern = Mock(return_value=True)
+        legacy = Mock(return_value=True)
+        plugins = types.SimpleNamespace(try_dispatch_slash=Mock(return_value=False))
+        access = types.SimpleNamespace(is_admin=Mock(return_value=False))
+        runtime = types.SimpleNamespace(
+            dispatch_external_music_command=modern,
+            services=types.SimpleNamespace(
+                routing=types.SimpleNamespace(access=access),
+                interaction=types.SimpleNamespace(music=types.SimpleNamespace(handle_slash=legacy)),
+            ),
+            plugin_host=object(),
+        )
+        router = object.__new__(SlashCommandRouter)
+        router._runtime = runtime
+        router._services = runtime.services
+        router._plugins = plugins
+        router._current_user = ""
+
+        router.dispatch("/bf bili 稻香", "channel", "area", "user")
+
+        modern.assert_called_once_with("/bf bili 稻香", "channel", "area", "user")
+        legacy.assert_not_called()
+
+    def test_oopz_slash_commands_normalize_into_shared_parser(self) -> None:
+        from oopzbot import bridge
+
+        self.assertEqual(bridge._modern_oopz_music_command("/queue"), "队列")
+        self.assertEqual(
+            bridge._modern_oopz_music_command("/bf bili 稻香"),
+            "播放 bilibili:稻香",
+        )
+        self.assertEqual(bridge._modern_oopz_music_command("/pick 2"), "选歌 2")
+        self.assertEqual(bridge._modern_oopz_music_command("/like 3"), "喜欢 3")
+        self.assertEqual(
+            bridge._modern_oopz_music_command("/like list 2"),
+            "喜欢列表 2",
+        )
+        self.assertEqual(bridge._modern_oopz_music_command("播放"), "播放")
+
+    def test_oopz_dispatch_uses_transport_target_and_avoids_duplicate_play_reply(self) -> None:
+        from oopzbot import bridge
+        from oopzbot.domain.contracts import CommandResult
+
+        with (
+            patch.object(
+                bridge,
+                "_execute_request",
+                return_value=CommandResult(ok=True, message="已点歌"),
+            ) as execute,
+            patch.object(bridge, "_notify_music") as notify,
+        ):
+            handled = bridge.dispatch_oopz_music_command(
+                "播放 测试",
+                "text-1",
+                "area-1",
+                "user-1",
+            )
+
+        self.assertTrue(handled)
+        request = execute.call_args.args[0]
+        self.assertEqual(request.source, "oopz")
+        self.assertEqual(request.area_id, "area-1")
+        self.assertEqual(request.text_channel_id, "text-1")
+        self.assertEqual(request.bot_user_id, "")
+        notify.assert_not_called()
+
+    def test_oopz_dispatch_reports_modern_failure_without_legacy_fallback(self) -> None:
+        from oopzbot import bridge
+
+        with (
+            patch.object(bridge, "_execute_request", side_effect=RuntimeError("boom")),
+            patch.object(bridge, "_music_handler", return_value=object()),
+            patch.object(bridge, "_notify_music") as notify,
+        ):
+            handled = bridge.dispatch_oopz_music_command(
+                "停止",
+                "text-1",
+                "area-1",
+                "user-1",
+            )
+
+        self.assertTrue(handled)
+        notify.assert_called_once_with(
+            unittest.mock.ANY,
+            text="音乐命令执行失败，请稍后重试",
+            channel="text-1",
+            area="area-1",
+        )
+
+    def test_oopz_read_command_sends_one_result_through_legacy_sender(self) -> None:
+        from oopzbot import bridge
+        from oopzbot.domain.contracts import CommandResult
+
+        with (
+            patch.object(
+                bridge,
+                "_execute_request",
+                return_value=CommandResult(ok=True, message="队列为空"),
+            ),
+            patch.object(bridge, "_music_handler", return_value=object()),
+            patch.object(bridge, "_notify_music") as notify,
+        ):
+            handled = bridge.dispatch_oopz_music_command(
+                "列表",
+                "text-1",
+                "area-1",
+                "user-1",
+            )
+
+        self.assertTrue(handled)
+        notify.assert_called_once_with(
+            unittest.mock.ANY,
+            text="队列为空",
+            channel="text-1",
+            area="area-1",
+        )
+
 
 class _ScheduledTask:
     def add_done_callback(self, callback) -> None:

@@ -26,6 +26,7 @@ except ImportError:
     sys.modules["fastapi.responses"] = responses_module
 
 from oopzbot import bridge
+from oopzbot.commands.parser import parse_platform_keyword
 from oopzbot.controller import MusicQueue
 
 
@@ -33,12 +34,13 @@ class _FakeMusic:
     def __init__(self) -> None:
         self.queue = MusicQueue()
         self.search_limit = 0
+        self.search_platform = ""
 
     def _get_queue(self, _area: str) -> MusicQueue:
         return self.queue
 
     def search_candidates(self, keyword: str, platform: str, limit: int = 5) -> list[dict]:
-        del platform
+        self.search_platform = platform
         self.search_limit = limit
         return [
             {
@@ -62,6 +64,18 @@ class _FailedPlaybackMusic(_FakeMusic):
 
     def play_song_choice(self, *_args) -> dict:
         return {"code": "error", "message": "歌曲不可播放"}
+
+
+class _RecordingPlaybackMusic(_FakeMusic):
+    def __init__(self) -> None:
+        super().__init__()
+        self._voice_channel_id = "voice"
+        self._voice_channel_area = "area"
+        self.play_args = None
+
+    def play_song(self, *args) -> dict:
+        self.play_args = args
+        return {"code": "success", "message": "已点歌"}
 
 
 class _LegacyQueue:
@@ -248,6 +262,11 @@ class QueuePanelTests(unittest.TestCase):
 
 
 class SearchResultTests(unittest.TestCase):
+    def test_platform_prefix_parser_preserves_legacy_aliases(self) -> None:
+        self.assertEqual(parse_platform_keyword("QQ: 周杰伦"), ("qq", "周杰伦"))
+        self.assertEqual(parse_platform_keyword("b站：稻香"), ("bilibili", "稻香"))
+        self.assertEqual(parse_platform_keyword("网易: 搁浅"), ("netease", "搁浅"))
+
     def test_search_returns_first_ten_candidates(self) -> None:
         music = _FakeMusic()
 
@@ -256,6 +275,47 @@ class SearchResultTests(unittest.TestCase):
         self.assertEqual(music.search_limit, 10)
         self.assertEqual(len(result["songs"]), 10)
         self.assertEqual(result["songs"][-1]["index"], 10)
+
+    def test_search_uses_selected_platform(self) -> None:
+        music = _FakeMusic()
+
+        bridge._search_songs(
+            music,
+            "hello",
+            "group:user",
+            platform="bilibili",
+        )
+
+        self.assertEqual(music.search_platform, "bilibili")
+
+    def test_oopz_play_uses_oopz_requester_and_platform(self) -> None:
+        from oopzbot.domain.contracts import CommandRequest
+
+        music = _RecordingPlaybackMusic()
+        previous_dependency = bridge._music_dependency
+        bridge._music_dependency = music
+        try:
+            with patch.object(
+                bridge,
+                "_command_config",
+                return_value=("area", "text", "voice", "bot"),
+            ):
+                result = bridge._execute_request(
+                    CommandRequest(
+                        command="播放 b站：稻香",
+                        requester_id="oopz-user",
+                        group_openid="area",
+                        source="oopz",
+                    )
+                )
+        finally:
+            bridge._music_dependency = previous_dependency
+
+        self.assertTrue(result.ok)
+        self.assertEqual(
+            music.play_args,
+            ("稻香", "bilibili", "text", "area", "oopz-user"),
+        )
 
     def test_failed_song_selection_is_reported_and_session_is_retained(self) -> None:
         music = _FailedPlaybackMusic()

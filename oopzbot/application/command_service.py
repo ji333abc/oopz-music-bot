@@ -9,7 +9,7 @@ from oopzbot.domain.compat import command_result_from_legacy
 from oopzbot.domain.contracts import CommandRequest, CommandResult
 from oopzbot.observability import command_context, ensure_command_id
 
-LegacyCommandExecutor = Callable[[str, str], dict]
+CommandExecutor = Callable[[CommandRequest], dict]
 
 
 class CommandService:
@@ -22,7 +22,7 @@ class CommandService:
 
     def __init__(
         self,
-        executor: LegacyCommandExecutor,
+        executor: CommandExecutor,
         *,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -34,7 +34,7 @@ class CommandService:
         with command_context(command_id):
             self._logger.info("开始处理命令 command=%r", request.command)
             try:
-                raw = self._executor(request.command, request.requester_key)
+                raw = self._executor(request)
             except Exception:
                 self._logger.exception("命令处理失败 command=%r", request.command)
                 raise

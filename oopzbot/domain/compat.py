@@ -369,6 +369,10 @@ def command_request_from_legacy(value: Mapping[str, Any]) -> CommandRequest:
         group_openid=_first_text(data, "group_openid"),
         source=_first_text(data, "source", default="unknown"),
         command_id=_first_text(data, "command_id") or None,
+        area_id=_first_text(data, "area_id"),
+        text_channel_id=_first_text(data, "text_channel_id"),
+        voice_channel_id=_first_text(data, "voice_channel_id"),
+        bot_user_id=_first_text(data, "bot_user_id"),
     )
 
 
@@ -380,6 +384,10 @@ def command_request_to_legacy(value: CommandRequest) -> dict[str, str]:
         "group_openid": value.group_openid,
         "source": value.source,
         "command_id": value.command_id or "",
+        "area_id": value.area_id,
+        "text_channel_id": value.text_channel_id,
+        "voice_channel_id": value.voice_channel_id,
+        "bot_user_id": value.bot_user_id,
     }
 
 

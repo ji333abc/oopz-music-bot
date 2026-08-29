@@ -31,6 +31,18 @@ class PlaybackBackendPort(Protocol):
 
     def stop_play(self, channel: str, area: str) -> Any: ...
 
+    def play_liked(self, channel: str, area: str, user: str, count: int) -> Any: ...
+
+    def play_liked_by_index(
+        self,
+        index: int,
+        channel: str,
+        area: str,
+        user: str,
+    ) -> Any: ...
+
+    def show_liked_list(self, channel: str, area: str, page: int) -> Any: ...
+
 
 class PlaybackService:
     """Own command playback outcomes while delegating stable media mechanics.
@@ -90,6 +102,41 @@ class PlaybackService:
         except Exception as exc:
             return self._failure(str(exc) or "停止播放失败", stage="stopping")
         return OperationResult(ok=True, message="已停止播放")
+
+    def play_liked(
+        self,
+        *,
+        channel: str,
+        area: str,
+        requester_id: str,
+        count: int = 1,
+    ) -> OperationResult:
+        try:
+            self._backend.play_liked(channel, area, requester_id, count)
+        except Exception as exc:
+            return self._failure(str(exc) or "随机播放喜欢歌曲失败", stage="playing")
+        return OperationResult(ok=True, message="已执行随机播放")
+
+    def play_liked_by_index(
+        self,
+        index: int,
+        *,
+        channel: str,
+        area: str,
+        requester_id: str,
+    ) -> OperationResult:
+        try:
+            self._backend.play_liked_by_index(index, channel, area, requester_id)
+        except Exception as exc:
+            return self._failure(str(exc) or "播放喜欢歌曲失败", stage="playing")
+        return OperationResult(ok=True, message="已执行喜欢歌曲点播")
+
+    def show_liked(self, page: int, *, channel: str, area: str) -> OperationResult:
+        try:
+            self._backend.show_liked_list(channel, area, page)
+        except Exception as exc:
+            return self._failure(str(exc) or "读取喜欢列表失败", stage="resolving")
+        return OperationResult(ok=True, message="已显示喜欢列表")
 
     @classmethod
     def _from_legacy(cls, raw: Any, default: str) -> OperationResult:

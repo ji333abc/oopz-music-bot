@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from .application.playback_monitor_service import PlaybackMonitorService
 from .domain.compat import playback_state_from_legacy
 from .domain.contracts import (
     CommandError,
@@ -136,7 +137,7 @@ class LegacyOopzCore:
             raise RuntimeError("旧版 OOPZ Agora 语音客户端初始化失败")
 
         self.context = AppContextBuilder().build(resources.sender, voice=voice)
-        BackgroundServiceRunner().start(self.context)
+        BackgroundServiceRunner().start(self.context, start_music_monitor=False)
         self.context.client.start_async()
         self._shutdown = ShutdownCoordinator()
 
@@ -175,6 +176,9 @@ class LegacyOopzRuntimeAdapter:
     def __init__(self, core: LegacyOopzCore | None = None) -> None:
         self._core = core or LegacyOopzCore()
         self.music: LegacyMusicAdapter | None = None
+        self._playback_monitor: PlaybackMonitorService | None = None
+        self.command_implementation = "legacy-music-command-fallback"
+        self.playback_monitor_implementation = "playback-monitor-service"
 
     @property
     def ready(self) -> bool:
@@ -212,6 +216,8 @@ class LegacyOopzRuntimeAdapter:
             # Health and application code see the facade, not the legacy
             # Context object.  The wrapped gateway keeps its own internals.
             self.music.runtime = self
+            self._playback_monitor = PlaybackMonitorService(self.music)
+            self._playback_monitor.start()
         except Exception as exc:
             logger.exception("旧版 OOPZ Runtime Adapter 启动失败")
             return self._failure("启动 OOPZ 运行时失败", exc, "startup")
@@ -219,7 +225,19 @@ class LegacyOopzRuntimeAdapter:
         return OperationResult(ok=True, message="OOPZ 运行时已启动")
 
     def close(self) -> None:
+        if self._playback_monitor is not None:
+            self._playback_monitor.stop()
         self._core.close()
+
+    def bind_music_command_handler(self, handler) -> None:
+        """Route OOPZ music mentions into the modern command boundary."""
+
+        context = self._core.context
+        if context is None:
+            raise RuntimeError("OOPZ 运行时尚未启动")
+        context.handler.bind_external_music_command(handler)
+        self.command_implementation = "shared-command-service"
+        logger.info("OOPZ 音乐命令已接入现代 CommandService")
 
     def status(self) -> ComponentState:
         if self.ready:
