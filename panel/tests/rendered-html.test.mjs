@@ -110,12 +110,18 @@ test("proxies the unified structured snapshot", async () => {
 
 test("assigns independent command requester ids to browser sessions", async () => {
   const requesterIds = [];
+  const bridgeResult = {
+    ok: true,
+    reply_type: "rank_results",
+    title: "热歌榜",
+    songs: [{ rank: 1, title: "榜单歌曲", artists: "歌手", album_mid: "album-1" }],
+  };
   const bridge = createServer(async (request, response) => {
     let body = "";
     for await (const chunk of request) body += chunk;
     requesterIds.push(JSON.parse(body).requester_id);
     response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ ok: true, message: "ok" }));
+    response.end(JSON.stringify(bridgeResult));
   });
   await new Promise((resolve) => bridge.listen(0, "127.0.0.1", resolve));
   const address = bridge.address();
@@ -134,6 +140,7 @@ test("assigns independent command requester ids to browser sessions", async () =
         body: JSON.stringify({ command }),
       });
       assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), bridgeResult);
     }
     assert.equal(requesterIds.length, 2);
     assert.notEqual(requesterIds[0], requesterIds[1]);

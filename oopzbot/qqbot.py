@@ -20,9 +20,15 @@ import botpy
 import requests
 from botpy.message import GroupMessage
 
+from .jm.downloader import download_album, inspect_album
+from .jm.retention import cleanup_later, cleanup_stale
+from .jm.service import JMTaskCoordinator
+from .jm.uploader import JMUploadError, upload_archive
 from .observability import command_context, ensure_command_id
 from .operations import operations
 from .process_env import minimal_child_environment
+from .qq.formatter import plain_text as _format_qq_plain_text
+from .qq.reply_policy import ReplyErrorKind, ReplyPolicy, classify_reply_error
 
 logger = logging.getLogger("QQBotService")
 
@@ -99,15 +105,13 @@ ALLOWED_GROUPS = {
 
 _seen_messages: dict[str, float] = {}
 _seen_lock = Lock()
-_jm_job_lock = Lock()
+_jm_coordinator = JMTaskCoordinator()
+_jm_job_lock = _jm_coordinator.lock
 _jm_timing_lock = Lock()
-_jm_tasks: set[asyncio.Task] = set()
+_jm_tasks = _jm_coordinator.tasks
 _command_tasks: set[asyncio.Task] = set()
 _msg_seq_lock = Lock()
 _msg_seq = secrets.randbelow(65535)
-_OOPZ_INLINE_IMAGE_RE = re.compile(
-    r"(?m)^[ \t]*!\[IMAGEw\d+h\d+\]\([^\r\n]*\)[ \t]*(?:\r?\n|$)"
-)
 
 
 def _next_msg_seq() -> int:
@@ -120,42 +124,19 @@ def _next_msg_seq() -> int:
 
 def _qq_plain_text(content: str) -> str:
     """Remove OOPZ-only inline attachment markers from QQ text replies."""
-    return _OOPZ_INLINE_IMAGE_RE.sub("", str(content or "")).strip()
+    return _format_qq_plain_text(content)
 
 
 def _passive_reply_unavailable(error: Exception) -> bool:
-    normalized = str(error).replace(" ", "").lower()
-    if "40034031" in normalized:
-        return True
-    if "msgid" in normalized and any(
-        marker in normalized
-        for marker in ("过期", "失效", "expired", "invalid", "replylimit")
-    ):
-        return True
-    return any(
-        marker in normalized
-        for marker in (
-            "消息id已失效",
-            "回复次数已达上限",
-            "超过回复次数",
-        )
-    )
+    return classify_reply_error(error) is ReplyErrorKind.PASSIVE_UNAVAILABLE
 
 
 def _group_message_was_deduplicated(error: Exception) -> bool:
-    normalized = str(error).replace(" ", "").lower()
-    return "40054005" in normalized or "消息被去重" in normalized
+    return classify_reply_error(error) is ReplyErrorKind.DEDUPLICATED
 
 
 def _group_message_request_timed_out(error: Exception) -> bool:
-    if isinstance(error, (TimeoutError, asyncio.TimeoutError)):
-        return True
-    name = type(error).__name__.lower()
-    normalized = str(error).replace(" ", "").lower()
-    return "timeout" in name or any(
-        marker in normalized
-        for marker in ("请求超时", "timedout", "timeout", "连接超时")
-    )
+    return classify_reply_error(error) is ReplyErrorKind.TIMED_OUT
 
 
 def _parse_jm_album_ids(command: str) -> list[str]:
@@ -189,24 +170,13 @@ def _jm_uploader_environment() -> dict[str, str]:
 
 
 def _inspect_jm_album(album_id: str) -> int:
-    result = subprocess.run(
-        [JM_PYTHON, JM_WORKER, "--inspect", album_id],
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        env=_jm_worker_environment(),
-        timeout=JM_INSPECT_TIMEOUT_SECONDS,
-        check=False,
+    return inspect_album(
+        python=JM_PYTHON,
+        worker=JM_WORKER,
+        album_id=album_id,
+        environment=_jm_worker_environment(),
+        timeout_seconds=JM_INSPECT_TIMEOUT_SECONDS,
     )
-    for line in reversed(result.stdout.splitlines()):
-        if not line.startswith("JM_METADATA="):
-            continue
-        metadata = json.loads(line.removeprefix("JM_METADATA="))
-        page_count = int(metadata.get("page_count") or 0)
-        if page_count > 0:
-            return page_count
-    detail = (result.stderr or result.stdout).strip().replace("\n", " ")[-500:]
-    raise RuntimeError(detail or f"JM 元数据查询失败（退出码 {result.returncode}）")
 
 
 def _load_jm_timing_samples() -> list[dict]:
@@ -315,57 +285,14 @@ def _record_jm_timing(sample: dict) -> None:
 
 
 def _run_jm_download(album_id: str, password: str, job_dir: Path) -> tuple[Path, dict]:
-    job_dir.mkdir(parents=True, exist_ok=False)
-    log_path = job_dir / "download.log"
-    environment = _jm_worker_environment(password)
-
-    with log_path.open("w", encoding="utf-8") as log_file:
-        result = subprocess.run(
-            [JM_PYTHON, JM_WORKER, album_id, str(job_dir)],
-            stdin=subprocess.DEVNULL,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            text=True,
-            env=environment,
-            timeout=JM_TIMEOUT_SECONDS,
-            check=False,
-        )
-
-    if result.returncode != 0:
-        try:
-            detail = log_path.read_text(encoding="utf-8", errors="replace")[-2000:]
-        except OSError:
-            detail = ""
-        raise RuntimeError(
-            f"JMComic 下载进程退出码 {result.returncode}"
-            + (f"：{detail}" if detail else "")
-        )
-
-    archive = job_dir / "archives" / f"JM{album_id}.zip"
-    if not archive.is_file():
-        raise RuntimeError("下载完成但未找到 ZIP 文件")
-    result_path = job_dir / "result.json"
-    try:
-        download_result = json.loads(result_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        download_result = {}
-    return archive, download_result
-
-
-class JMUploadError(RuntimeError):
-    def __init__(self, error_type: str, message: str) -> None:
-        super().__init__(message)
-        self.error_type = error_type
-
-
-async def _pump_uploader_stderr(stream: asyncio.StreamReader) -> None:
-    while True:
-        line = await stream.readline()
-        if not line:
-            return
-        text = line.decode("utf-8", errors="replace").strip()
-        if text:
-            logger.info("JMUploader: %s", text)
+    return download_album(
+        python=JM_PYTHON,
+        worker=JM_WORKER,
+        album_id=album_id,
+        job_dir=job_dir,
+        environment=_jm_worker_environment(password),
+        timeout_seconds=JM_TIMEOUT_SECONDS,
+    )
 
 
 async def _run_jm_upload(
@@ -374,84 +301,32 @@ async def _run_jm_upload(
     message_id: str,
     display_name: str,
 ) -> dict:
-    process = await asyncio.create_subprocess_exec(
-        JM_NODE,
-        JM_UPLOADER,
-        "--group-openid",
-        group_openid,
-        "--msg-id",
-        message_id,
-        "--file",
-        str(archive.resolve()),
-        "--name",
-        display_name,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=_jm_uploader_environment(),
+    return await upload_archive(
+        node=JM_NODE,
+        uploader=JM_UPLOADER,
+        archive=archive,
+        group_openid=group_openid,
+        message_id=message_id,
+        display_name=display_name,
+        environment=_jm_uploader_environment(),
+        timeout_seconds=JM_UPLOAD_TIMEOUT_SECONDS,
+        logger=logger,
     )
-    assert process.stdout is not None
-    assert process.stderr is not None
-    stdout_task = asyncio.create_task(process.stdout.read())
-    stderr_task = asyncio.create_task(_pump_uploader_stderr(process.stderr))
-
-    try:
-        await asyncio.wait_for(
-            process.wait(),
-            timeout=JM_UPLOAD_TIMEOUT_SECONDS,
-        )
-    except TimeoutError as exc:
-        process.kill()
-        await process.wait()
-        raise JMUploadError(
-            "timeout",
-            f"QQ 文件上传超过 {JM_UPLOAD_TIMEOUT_SECONDS} 秒",
-        ) from exc
-    finally:
-        stdout_bytes = await stdout_task
-        await stderr_task
-
-    output_lines = [
-        line.strip()
-        for line in stdout_bytes.decode("utf-8", errors="replace").splitlines()
-        if line.strip()
-    ]
-    if not output_lines:
-        raise JMUploadError(
-            "api",
-            f"QQ 上传器未返回结果（退出码 {process.returncode}）",
-        )
-
-    try:
-        result = json.loads(output_lines[-1])
-    except ValueError as exc:
-        raise JMUploadError("api", "QQ 上传器返回了无效结果") from exc
-
-    if process.returncode != 0 or result.get("ok") is not True:
-        error_type = str(result.get("errorType") or "api")
-        message = str(result.get("message") or "QQ 文件上传失败")
-        raise JMUploadError(error_type, message[-500:])
-    return result
 
 
 async def _cleanup_jm_job_later(
     job_dir: Path,
     delay_seconds: int = JM_FAILURE_RETAIN_SECONDS,
 ) -> None:
-    await asyncio.sleep(delay_seconds)
-    await asyncio.to_thread(shutil.rmtree, job_dir, True)
-    logger.info("JM 失败任务文件已自动清理: %s", job_dir)
+    await cleanup_later(job_dir, delay_seconds=delay_seconds, logger=logger)
 
 
 def _cleanup_stale_jm_jobs() -> None:
-    cutoff = time.time() - JM_FAILURE_RETAIN_SECONDS
-    for job_dir in JM_TEMP_ROOT.glob("jm-*"):
-        try:
-            if job_dir.is_dir() and job_dir.stat().st_mtime <= cutoff:
-                shutil.rmtree(job_dir)
-                logger.info("已清理启动前遗留的 JM 失败任务: %s", job_dir)
-        except OSError:
-            logger.exception("清理遗留 JM 任务失败: %s", job_dir)
+    cleanup_stale(
+        JM_TEMP_ROOT,
+        retain_seconds=JM_FAILURE_RETAIN_SECONDS,
+        logger=logger,
+    )
 
 
 def _is_duplicate(message_id: str) -> bool:
@@ -495,6 +370,9 @@ def _forward_command(
     return payload
 
 
+_reply_policy = ReplyPolicy(_next_msg_seq, logger=logger)
+
+
 class OopzQQClient(botpy.Client):
     async def on_ready(self):
         logger.info("QQ 机器人已上线: %s", self.robot.name)
@@ -510,40 +388,11 @@ class OopzQQClient(botpy.Client):
         message: GroupMessage,
         payload: dict,
     ) -> None:
-        request = {"group_openid": message.group_openid, **payload}
-        try:
-            await message._api.post_group_message(**request)
-        except Exception as exc:
-            retry_passive = _group_message_was_deduplicated(
-                exc
-            ) or _group_message_request_timed_out(exc)
-            if "msg_id" in request and retry_passive:
-                logger.warning(
-                    "被动回复失败，换新 msg_seq 重试: group_openid=%s error=%s",
-                    message.group_openid,
-                    str(exc).replace("\n", " ")[-300:],
-                )
-                request["msg_seq"] = _next_msg_seq()
-                try:
-                    await message._api.post_group_message(**request)
-                    return
-                except Exception as retry_exc:
-                    exc = retry_exc
-
-            fallback_allowed = _passive_reply_unavailable(
-                exc
-            ) or _group_message_request_timed_out(exc)
-            if "msg_id" not in request or not fallback_allowed:
-                raise
-
-            logger.warning(
-                "被动回复失败，改为主动群消息发送: group_openid=%s error=%s",
-                message.group_openid,
-                str(exc).replace("\n", " ")[-300:],
-            )
-            request.pop("msg_id", None)
-            request["msg_seq"] = _next_msg_seq()
-            await message._api.post_group_message(**request)
+        await _reply_policy.send(
+            message._api.post_group_message,
+            group_openid=message.group_openid,
+            payload=payload,
+        )
 
     @staticmethod
     def _reply_identity(
@@ -553,9 +402,7 @@ class OopzQQClient(botpy.Client):
         proactive: bool = False,
     ) -> dict:
         del msg_seq
-        if proactive:
-            return {"msg_seq": _next_msg_seq()}
-        return {"msg_id": message.id, "msg_seq": _next_msg_seq()}
+        return _reply_policy.identity(message.id, proactive=proactive)
 
     async def _reply(
         self,
@@ -1140,12 +987,11 @@ class OopzQQClient(botpy.Client):
                 cleanup_task = asyncio.create_task(
                     _cleanup_jm_job_later(job_dir)
                 )
-                _jm_tasks.add(cleanup_task)
-                cleanup_task.add_done_callback(_jm_tasks.discard)
+                _jm_coordinator.track(cleanup_task)
             else:
                 await asyncio.to_thread(shutil.rmtree, job_dir, True)
             if release_lock:
-                _jm_job_lock.release()
+                _jm_coordinator.release()
 
     async def _run_jm_batch(
         self,
@@ -1209,7 +1055,7 @@ class OopzQQClient(botpy.Client):
                 msg_seq=2,
             )
         finally:
-            _jm_job_lock.release()
+            _jm_coordinator.release()
 
     async def _start_jm_job(
         self,
@@ -1223,7 +1069,7 @@ class OopzQQClient(botpy.Client):
         if JM_ALLOWED_USERS and requester_id not in JM_ALLOWED_USERS:
             await self._reply(message, "你没有使用 JM 下载功能的权限")
             return
-        if not _jm_job_lock.acquire(blocking=False):
+        if not _jm_coordinator.acquire():
             await self._reply(message, "已有一个 JM 下载任务正在运行，请稍后再试")
             return
 
@@ -1252,8 +1098,7 @@ class OopzQQClient(botpy.Client):
             task = asyncio.create_task(
                 self._run_jm_job(message, album_id, page_count, job_id=job_id)
             )
-            _jm_tasks.add(task)
-            task.add_done_callback(_jm_tasks.discard)
+            _jm_coordinator.track(task)
         except Exception as exc:
             if job_id:
                 operations.update_jm_job(
@@ -1262,7 +1107,7 @@ class OopzQQClient(botpy.Client):
                     phase="failed",
                     error=f"启动任务失败：{type(exc).__name__}",
                 )
-            _jm_job_lock.release()
+            _jm_coordinator.release()
             raise
 
     async def _start_jm_batch(
@@ -1286,7 +1131,7 @@ class OopzQQClient(botpy.Client):
                 f"一次最多提交 {JM_BATCH_MAX_ITEMS} 个 JM ID",
             )
             return
-        if not _jm_job_lock.acquire(blocking=False):
+        if not _jm_coordinator.acquire():
             await self._reply(message, "已有一个 JM 下载任务正在运行，请稍后再试")
             return
 
@@ -1347,8 +1192,7 @@ class OopzQQClient(botpy.Client):
             await self._reply(message, "\n".join(lines), msg_seq=1)
 
             task = asyncio.create_task(self._run_jm_batch(message, jobs))
-            _jm_tasks.add(task)
-            task.add_done_callback(_jm_tasks.discard)
+            _jm_coordinator.track(task)
         except Exception as exc:
             for job_id in created_job_ids:
                 operations.update_jm_job(
@@ -1357,7 +1201,7 @@ class OopzQQClient(botpy.Client):
                     phase="failed",
                     error=f"启动批量任务失败：{type(exc).__name__}",
                 )
-            _jm_job_lock.release()
+            _jm_coordinator.release()
             raise
 
     async def _deliver_deferred_command(

@@ -10,6 +10,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from .domain.compat import playback_state_from_legacy
+from .domain.contracts import (
+    CommandError,
+    ComponentState,
+    ComponentStatus,
+    ErrorKind,
+    OperationResult,
+    PlaybackState,
+)
+
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -151,3 +161,198 @@ class LegacyOopzCore:
                 logger.warning("停止旧版 OOPZ WebSocket 失败", exc_info=True)
         if self._shutdown is not None and self._netease_runtime is not None:
             self._shutdown.stop(self.context, self._netease_runtime)
+
+
+class LegacyOopzRuntimeAdapter:
+    """OopzRuntimePort facade over the stable embedded legacy implementation.
+
+    Application services receive structured results and never inspect the
+    legacy Context, WebSocket, Agora client, or worker threads.
+    """
+
+    implementation_name = "legacy-oopz-runtime-adapter"
+
+    def __init__(self, core: LegacyOopzCore | None = None) -> None:
+        self._core = core or LegacyOopzCore()
+        self.music: LegacyMusicAdapter | None = None
+
+    @property
+    def ready(self) -> bool:
+        return self._core.ready
+
+    def start(self) -> OperationResult:
+        if self.music is not None:
+            if not self._core._closed.is_set():
+                return OperationResult(
+                    ok=True,
+                    message=(
+                        "OOPZ 运行时已启动"
+                        if self.ready
+                        else "OOPZ 运行时已启动，等待 WebSocket 认证"
+                    ),
+                )
+            return self._failure(
+                "OOPZ 运行时已停止或失去认证，必须显式重建 Adapter",
+                stage="startup",
+            )
+        try:
+            self.music = self._core.start()
+            # Health and application code see the facade, not the legacy
+            # Context object.  The wrapped gateway keeps its own internals.
+            self.music.runtime = self
+        except Exception as exc:
+            logger.exception("旧版 OOPZ Runtime Adapter 启动失败")
+            return self._failure("启动 OOPZ 运行时失败", exc, "startup")
+        logger.info("OOPZ runtime implementation=%s", self.implementation_name)
+        return OperationResult(ok=True, message="OOPZ 运行时已启动")
+
+    def close(self) -> None:
+        self._core.close()
+
+    def status(self) -> ComponentState:
+        if self.ready:
+            return ComponentState(
+                "oopz_runtime",
+                ComponentStatus.OK,
+                f"implementation={self.implementation_name}",
+            )
+        if self.music is not None:
+            return ComponentState(
+                "oopz_runtime",
+                ComponentStatus.DEGRADED,
+                "OOPZ WebSocket 尚未认证或连接已断开",
+            )
+        return ComponentState(
+            "oopz_runtime",
+            ComponentStatus.OFFLINE,
+            "OOPZ 运行时尚未启动",
+        )
+
+    def component_status(self, component: str) -> ComponentState:
+        """Expose bounded adapter-owned status without leaking Context."""
+
+        if component == "websocket":
+            context = self._core.context
+            client = getattr(context, "client", None) if context is not None else None
+            if bool(getattr(client, "authenticated", False)):
+                return ComponentState("oopz_websocket", ComponentStatus.OK)
+            if bool(getattr(client, "connected", False)):
+                return ComponentState(
+                    "oopz_websocket",
+                    ComponentStatus.STARTING,
+                    "OOPZ WebSocket 已连接，等待认证",
+                )
+            status = ComponentStatus.OFFLINE if self._core._closed.is_set() else ComponentStatus.DEGRADED
+            return ComponentState("oopz_websocket", status, "OOPZ WebSocket 未连接")
+        if component == "voice":
+            music = self.music
+            if music is not None and getattr(music, "_voice_channel_id", None):
+                return ComponentState("oopz_voice", ComponentStatus.OK)
+            if not self.ready:
+                return ComponentState(
+                    "oopz_voice",
+                    ComponentStatus.UNKNOWN,
+                    "尚未建立 OOPZ 语音会话",
+                )
+            return ComponentState(
+                "oopz_voice",
+                ComponentStatus.UNKNOWN,
+                "尚未加入语音频道",
+            )
+        return self.status()
+
+    def send_text(self, text: str, *, channel: str, area: str) -> OperationResult:
+        try:
+            music = self._require_music()
+            ok = bool(music.notify_message(text=text, channel=channel, area=area))
+        except Exception as exc:
+            return self._failure("OOPZ 文字消息发送失败", exc, "notification")
+        if not ok:
+            return self._failure("OOPZ 文字消息发送失败", stage="notification")
+        return OperationResult(ok=True)
+
+    def enter_voice(self, *, area: str, channel: str) -> OperationResult:
+        try:
+            music = self._require_music()
+            result = music.enter_voice_channel(channel, area)
+        except Exception as exc:
+            return self._failure("进入 OOPZ 语音频道失败", exc, "joining")
+        if not isinstance(result, dict) or result.get("error"):
+            detail = result.get("error") if isinstance(result, dict) else "unknown"
+            return self._failure(f"进入 OOPZ 语音频道失败: {detail}", stage="joining")
+        return OperationResult(ok=True)
+
+    def play(self, url: str, *, area: str, channel: str) -> OperationResult:
+        del area, channel
+        if not url:
+            return self._failure("播放地址为空", kind=ErrorKind.NOT_FOUND, stage="resolving")
+        try:
+            music = self._require_music()
+            voice = getattr(music, "voice", None)
+            if not voice or not voice.available:
+                return self._failure("OOPZ 语音服务不可用", stage="playing")
+            voice.play_audio(url)
+        except Exception as exc:
+            return self._failure("OOPZ 音频播放失败", exc, "playing")
+        return OperationResult(ok=True)
+
+    def pause(self) -> OperationResult:
+        return self._voice_boolean("pause_audio", "暂停播放失败")
+
+    def resume(self) -> OperationResult:
+        return self._voice_boolean("resume_audio", "继续播放失败")
+
+    def stop(self) -> OperationResult:
+        try:
+            music = self._require_music()
+            voice = getattr(music, "voice", None)
+            if voice and voice.available:
+                voice.stop_audio()
+        except Exception as exc:
+            return self._failure("停止播放失败", exc, "stopping")
+        return OperationResult(ok=True)
+
+    def current_state(self) -> PlaybackState:
+        if self.music is None:
+            return PlaybackState()
+        music = self.music
+        area = str(getattr(music, "_voice_channel_area", "") or "")
+        if not area:
+            return PlaybackState()
+        queue = music._get_queue(area)
+        current = queue.get_current()
+        song_id = str((current or {}).get("song_id") or (current or {}).get("id") or "")
+        return playback_state_from_legacy(
+            queue.get_play_state() or {},
+            current_song_id=song_id or None,
+        ) or PlaybackState()
+
+    def _require_music(self) -> LegacyMusicAdapter:
+        if self.music is None:
+            raise RuntimeError("OOPZ 运行时尚未启动")
+        return self.music
+
+    def _voice_boolean(self, method: str, message: str) -> OperationResult:
+        try:
+            music = self._require_music()
+            voice = getattr(music, "voice", None)
+            ok = bool(voice and getattr(voice, method)())
+        except Exception as exc:
+            return self._failure(message, exc, method)
+        return OperationResult(ok=ok, message="" if ok else message)
+
+    @staticmethod
+    def _failure(
+        message: str,
+        exception: Exception | None = None,
+        stage: str = "",
+        *,
+        kind: ErrorKind = ErrorKind.DEPENDENCY,
+    ) -> OperationResult:
+        detail = f": {exception}" if exception else ""
+        full_message = f"{message}{detail}"
+        return OperationResult(
+            ok=False,
+            message=full_message,
+            error=CommandError(kind=kind, message=full_message, stage=stage),
+        )

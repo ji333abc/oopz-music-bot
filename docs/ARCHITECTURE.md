@@ -1,90 +1,76 @@
-# 架构说明
+# OOPZ Music Bot 架构
 
-## 进程模型
+## 运行关系
 
-Docker 模式默认在主进程中嵌入迁移前的 OOPZ 核心。QQ、OOPZ 聊天和新面板共享同一个 MusicHandler 与 Redis 队列：
+```text
+QQ SDK ─┐
+        ├─> 18080 内部桥接 ─> CommandService
+Panel ──┘                         │
+                                 ├─> PlaybackService ─> Legacy OOPZ Runtime Adapter
+                                 ├─> QueueService ─> QueuePort Adapter ─> Redis/内存降级
+                                 └─> QQMusic Provider
 
-```mermaid
-flowchart TB
-    subgraph Process["oopzbot start"]
-        QQ["QQ Bot SDK\n接收与回复群消息"]
-        API["FastAPI 回环接口\nToken 鉴权"]
-        Controller["旧版 MusicHandler\nRedis 队列、播放与完整命令"]
-        Runtime["旧版 OOPZ Core\nWS 重连、Sender、Agora"]
-    end
-
-    QQ -->|"HTTP 127.0.0.1"| API
-    API --> Controller
-    Controller --> Runtime
-    Controller --> MusicAPI["固定版本 QQ Music API\n独立 Compose 服务"]
-    OOPZChat["OOPZ 频道消息"] --> Runtime
-    Runtime --> OOPZ["OOPZ REST / WebSocket / Agora"]
-    QQ --> QQCloud["QQ 官方机器人 API"]
+QQ SDK ─> ReplyPolicy
+       └> JM task coordinator ─> downloader/uploader/retention adapters
 ```
 
-内部 HTTP 桥接负责隔离 QQ SDK 的事件循环与 OOPZ 运行时；本地部署只允许回环客户端，Compose 中只向私有容器网络开放，并始终校验随机 Token。
+容器仍为 `redis`、`qqmusic`、`bot`、`panel`。Redis、QQMusic 和 18080 仅在 Compose
+网络中使用；Panel 与旧 Web 默认只绑定宿主机 `127.0.0.1`。
 
-## 模块
+## 模块所有权
 
-| 模块 | 职责 |
-| --- | --- |
-| `oopzbot/app.py` | CLI、配置加载、进程生命周期和内部 API 启动 |
-| `oopzbot/config.py` | 类型化环境变量、校验和 Token 生成 |
-| `oopzbot/qqbot.py` | QQ 群消息接收、回复和可选任务编排 |
-| `oopzbot/bridge.py` | 命令解析、搜索会话、排行榜会话和鉴权 |
-| `oopzbot/legacy_runtime.py` | 将旧版 OOPZ 核心嵌入当前进程并提供桥接适配 |
-| `legacy_oopzbot/src/` | 迁移前的消息、管理、插件、语音和 Redis 音乐核心 |
-| `oopzbot/controller.py` | 关闭旧核心时使用的精简 SDK 回退控制器 |
-| `oopzbot/music.py` | QQ 音乐 HTTP 响应兼容和数据标准化 |
-| `oopzbot/qqmusic_service.py` | 固定版本音乐 API 的校验、启动、就绪检测与关闭 |
-| `oopzbot/runtime.py` | OOPZ SDK 的线程安全同步门面 |
-| `oopzbot/jm_worker.py` | 可选后台归档任务 |
-| `tools/qqbot-uploader/` | 可选 QQ 群文件上传器 |
+| 层 | 模块 | 所有权 |
+| --- | --- | --- |
+| 领域 | `oopzbot/domain` | DTO、错误枚举、Port；不导入框架或基础设施 |
+| 应用 | `oopzbot/application` | 命令、播放结果和队列业务语义 |
+| 命令 | `oopzbot/commands` | 纯解析、别名注册表 |
+| HTTP | `oopzbot/http` | 内网和 Token 鉴权、输入校验 |
+| QQ | `oopzbot/qq` | QQ 文案清理、有限重试与主动发送降级 |
+| JM | `oopzbot/jm` | 子进程、上传、任务锁、清理策略 |
+| 基础设施 | `oopzbot/infrastructure` | 旧队列到 QueuePort 的兼容转换 |
+| OOPZ | `oopzbot/legacy_runtime.py` | 凭据、WebSocket、Agora 和旧实现适配 |
 
-## 音乐命令调用链
+## 关键不变量
 
-```mermaid
-sequenceDiagram
-    participant User as QQ 群用户
-    participant QQ as QQ Bot
-    participant API as 命令桥接
-    participant Core as 旧版 MusicHandler
-    participant Music as 音乐 API
-    participant OOPZ as OOPZ Sender / Agora
+- QQ 与 Panel 的控制命令都进入 18080 的同一 `CommandService`。
+- 待播队列编号始终从 1 开始，当前歌曲不属于待播编号。
+- 批量删除先完整校验；Redis 使用单条 Lua 操作，内存队列使用同一临界区。
+- Redis 键和旧扁平 JSON 保持不变。
+- Redis 降级队列或播放状态非空时不自动切回，防止静默丢队列；清空后才能切回真实 Redis。
+- QQ 被动回复最多重试一次，随后最多主动发送一次；无主动权限立即结束。
+- JM 子进程只获得允许列表中的环境变量。
+- 当前 OOPZ 实现通过日志和 `/readyz`、Panel 快照的 `runtime_implementation` 明示。
 
-    User->>QQ: @机器人 点歌 歌名
-    QQ->>API: 命令 + 用户/群标识 + Token
-    API->>Core: play_song
-    Core->>Music: 搜索、获取播放地址
-    Music-->>Core: 标准化歌曲数据
-    Core->>OOPZ: 加入语音频道、播放 URL
-    Core-->>API: 执行结果
-    API-->>QQ: JSON
-    QQ-->>User: 群消息回复
-```
+## 仍保留的兼容边界
 
-## 并发模型
+旧核心仍提供 OOPZ 收包、非音乐管理命令、消息发送、旧 Web、Redis 播放状态和 Agora
+推流。它通过 `LegacyOopzRuntimeAdapter` 启动，并已作为 wheel 的声明包内容，不再只依赖
+Docker `COPY` 才能存在。
 
-- QQ Bot SDK 管理自己的事件循环。
-- FastAPI 在后台线程中监听回环端口。
-- 旧版 OOPZ WebSocket 使用心跳、失效检测、凭据刷新和指数退避重连。
-- OOPZ 消息由分片工作队列处理，同一频道保持顺序。
-- 播放队列由 Redis 按域隔离并持久化；Redis 不可用时旧核心会暂时回退到内存。
-- Agora 浏览器运行在专用线程，支持远程地址失败后的本地下载兜底和预加载。
-- 耗时归档任务使用独立子进程，不阻塞消息处理。
-- 本地部署由 Python 主进程托管固定版本 QQ 音乐 API 子进程；Docker 部署使用独立内部容器。
+旧 Web 与旧 OOPZ 命令尚未删除。它们存在真实运行时调用方，且删除门禁要求测试服务器、
+回滚演练和 24 小时观察证据；本地重构不能伪造这些证据。
+
+## 并发与进程模型
+
+- QQ SDK 管理异步事件循环，慢命令在线程中调用 18080，不发送中间“正在处理”回复。
+- FastAPI 在后台线程监听；命令临界区继续使用既有 `_command_lock`，本轮未改变锁模型。
+- OOPZ WebSocket 使用旧核心已验证的分片工作队列、认证、心跳和重连实现。
+- Agora 播放与完成回调仍在旧运行时内；应用层通过 PlaybackService/Runtime Port 接触能力。
+- JM 下载与上传使用子进程，取消或超时会终止上传子进程并由 Service 释放任务锁。
+- Redis 批量删除在服务端 Lua 脚本内完成，避免跨线程或跨客户端的部分删除。
 
 ## 数据与持久化
 
-Compose 使用启用 AOF 的 Redis 容器保存播放队列。`data/legacy/` 保存旧核心数据库、插件状态、登录刷新结果和日志；`data/` 还保存 JM 状态。镜像重建不会清除这些内容，`docker compose down -v` 会删除 Redis 卷，因此迁移和日常维护都不应使用 `-v`。
+Compose 使用启用 AOF 的 Redis 保存播放队列。键名继续为 `music:queue`、
+`music:current`、`music:default_channel`、`music:play_state` 和 `music:play_mode`；带域时沿用
+原域隔离规则。`data/legacy/` 保存旧核心数据库、插件状态和登录凭据刷新结果，`data/` 还保存
+JM 状态。禁止使用 `docker compose down -v` 进行更新或回滚。
 
 ## 安全边界
 
-- 内部 API 强制使用回环地址。
-- 每个内部命令请求校验 `QQBOT_BRIDGE_TOKEN`。
-- QQ 群可通过 `QQBOT_ALLOWED_GROUP_OPENIDS` 设置白名单。
-- 可选后台任务可另设用户白名单。
-- Secret 只从环境变量读取，不写入日志或 API 响应。
-- 音乐 API 子进程使用最小环境变量集合，不继承 QQ Bot 和 OOPZ 凭据。
-- 旧版配置和 RSA 私钥不会进入镜像或 Git；账号密码刷新结果只写入 `data/legacy/`。
-- 旧版 Web 管理端口和新面板默认只绑定宿主机 `127.0.0.1`。
+- 18080 校验来源地址和随机 `QQBOT_BRIDGE_TOKEN`；Redis 与 QQMusic 不暴露宿主端口。
+- QQ 群与 JM 均可独立设置 OpenID 白名单。
+- Secret 只从环境或权限受限的持久目录读取，不进入状态响应和普通日志。
+- QQMusic、JM worker 和上传器子进程使用环境变量允许列表，不继承整个 Bot 环境。
+- Panel 密码和 RackNerd 凭据只注入 Panel 容器，Bot Compose 环境显式清空这些值。
+- 旧 Web 与 Panel 默认仅绑定 `127.0.0.1`，公网访问应由带 TLS 和认证的 Nginx 代理提供。

@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import logging
 import os
 import re
-import secrets
 import shutil
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
@@ -18,7 +17,27 @@ import requests
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from .application.command_service import CommandService
+from .application.playback_service import PlaybackService
+from .application.queue_service import QueuePositionError, QueueService
+from .commands.formatter import format_queue, format_search, format_seconds
+from .commands.parser import (
+    parse_queue_positions,
+    play_keyword,
+    search_keyword,
+)
+from .commands.registry import CommandKind, exact_command_kind
+from .commands.sessions import ExpiringSessionStore
 from .config import get_settings
+from .domain.compat import (
+    command_result_to_legacy,
+    display_song_from_legacy,
+    queue_item_to_legacy,
+)
+from .domain.contracts import CommandRequest, PlaybackState
+from .http.security import authorize_bridge_request
+from .http.validation import CommandInputError, command_request_from_http
+from .infrastructure.queue_adapter import LegacyQueueAdapter
 from .observability import (
     command_context,
     current_command_id,
@@ -32,11 +51,10 @@ router = APIRouter()
 _music_dependency = None
 
 _command_lock = Lock()
-_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
-_search_sessions: dict[str, dict] = {}
 _SEARCH_SESSION_TTL_SECONDS = 300
-_rank_sessions: dict[str, dict] = {}
 _RANK_SESSION_TTL_SECONDS = 300
+_search_sessions = ExpiringSessionStore(_SEARCH_SESSION_TTL_SECONDS)
+_rank_sessions = ExpiringSessionStore(_RANK_SESSION_TTL_SECONDS)
 
 _QQ_RANKS = (
     (26, "巅峰榜·热歌"),
@@ -144,21 +162,6 @@ def _notify_music(music, *, text: str, channel: str, area: str, **kwargs) -> boo
         logger.warning("OOPZ 文字消息发送失败，继续执行: %s", exc)
         return False
     return True
-
-
-def _music_action_error(result, default: str = "音乐操作未返回执行结果") -> str:
-    """Normalize the result contract shared by the current and legacy cores."""
-    if not isinstance(result, dict):
-        return default
-    if result.get("ok") is False or str(result.get("code") or "").lower() in {
-        "error",
-        "failed",
-        "failure",
-    }:
-        return str(result.get("message") or result.get("error") or default)
-    if result.get("error"):
-        return str(result.get("error"))
-    return ""
 
 
 def _rank_catalog() -> dict:
@@ -272,12 +275,12 @@ def _rank_detail(rank_id: int, title: str, requester_key: str) -> dict:
     if not songs:
         return {"ok": False, "message": f"暂时无法获取QQ音乐{title}"}
 
-    _rank_sessions[requester_key] = {
-        "expires_at": time.monotonic() + _RANK_SESSION_TTL_SECONDS,
-        "rank_id": rank_id,
-        "title": title,
-        "songs": songs,
-    }
+    _rank_sessions.put(
+        requester_key,
+        rank_id=rank_id,
+        title=title,
+        songs=songs,
+    )
     lines = [title]
     lines.extend(
         f"{song['rank']}. {song['title']} - {song['artists']}"
@@ -303,9 +306,8 @@ def _select_rank_song(
     voice_channel: str,
     bot_user: str,
 ) -> dict:
-    session = _rank_sessions.get(requester_key)
-    if not session or time.monotonic() > float(session.get("expires_at") or 0):
-        _rank_sessions.pop(requester_key, None)
+    session = _rank_sessions.get_active(requester_key)
+    if not session:
         return {"ok": False, "message": "排行榜结果已失效，请重新打开榜单"}
 
     rank_songs = session.get("songs") or []
@@ -330,9 +332,14 @@ def _select_rank_song(
             detail = result.get("error") if isinstance(result, dict) else "unknown"
             return {"ok": False, "message": f"进入 Oopz 语音频道失败: {detail}"}
 
-    play_result = music.play_song_choice(song, text_channel, area, bot_user)
-    if error := _music_action_error(play_result, "榜单歌曲未能开始播放或加入队列"):
-        return {"ok": False, "message": error}
+    play_result = _playback_service(music).play_choice(
+        song,
+        channel=text_channel,
+        area=area,
+        requester_id=bot_user,
+    )
+    if not play_result.ok:
+        return {"ok": False, "message": play_result.message}
     _rank_sessions.pop(requester_key, None)
     return {
         "ok": True,
@@ -417,9 +424,8 @@ def _queue_rank_songs(
     bot_user: str,
 ) -> dict:
     """把当前排行榜前若干首按顺序加入播放队列，最多十首。"""
-    session = _rank_sessions.get(requester_key)
-    if not session or time.monotonic() > float(session.get("expires_at") or 0):
-        _rank_sessions.pop(requester_key, None)
+    session = _rank_sessions.get_active(requester_key)
+    if not session:
         return {"ok": False, "message": "排行榜结果已失效，请重新打开榜单"}
 
     count = max(1, min(int(count), 10))
@@ -526,10 +532,7 @@ def _command_config() -> tuple[str, str, str, str]:
 
 
 def _play_keyword(command: str) -> str:
-    for prefix in ("播放歌曲", "点播歌曲", "来一首", "放一首", "点歌", "播放", "点播"):
-        if command.startswith(prefix):
-            return command[len(prefix):].strip()
-    return ""
+    return play_keyword(command)
 
 
 def _voice_member_summary(music, area: str, voice_channel: str, bot_user: str) -> str:
@@ -761,11 +764,17 @@ def _voice_channels_payload(
 
 
 def _format_seconds(value) -> str:
-    try:
-        seconds = max(0, int(float(value or 0)))
-    except (TypeError, ValueError):
-        seconds = 0
-    return f"{seconds // 60:02d}:{seconds % 60:02d}"
+    return format_seconds(value)
+
+
+def _queue_service(music, area: str) -> QueueService:
+    """Build the single command-facing queue boundary for one OOPZ area."""
+
+    return QueueService(LegacyQueueAdapter(music._get_queue(area)))
+
+
+def _playback_service(music) -> PlaybackService:
+    return PlaybackService(music)
 
 
 def _music_channel_member_count(music, area: str, voice_channel: str, bot_user: str) -> int:
@@ -802,19 +811,19 @@ def _music_channel_member_count(music, area: str, voice_channel: str, bot_user: 
 
 
 def _playback_payload(music, area: str, voice_channel: str, bot_user: str) -> dict:
-    queue = music._get_queue(area)
-    current = queue.get_current()
-    play_state = queue.get_play_state() or {}
+    snapshot = _queue_service(music, area).snapshot()
+    current = queue_item_to_legacy(snapshot.current) if snapshot.current else None
+    play_state = snapshot.playback or PlaybackState()
     duration_seconds = 0.0
     elapsed = 0.0
     if current:
         duration_seconds = float(current.get("duration_ms") or 0) / 1000
         if not duration_seconds:
-            duration_seconds = float(play_state.get("duration") or 0)
-        if play_state.get("paused"):
-            elapsed = float(play_state.get("pause_elapsed") or 0)
+            duration_seconds = play_state.duration_seconds
+        if play_state.paused:
+            elapsed = float(play_state.pause_elapsed or 0)
         else:
-            start_time = float(play_state.get("start_time") or 0)
+            start_time = play_state.start_time
             elapsed = max(0.0, time.time() - start_time) if start_time else 0.0
         if duration_seconds:
             elapsed = min(elapsed, duration_seconds)
@@ -822,11 +831,11 @@ def _playback_payload(music, area: str, voice_channel: str, bot_user: str) -> di
     return {
         "current": _qq_song_payload(current) if current else None,
         "playing": bool(current),
-        "paused": bool(play_state.get("paused")),
-        "loading": bool(play_state.get("loading")),
+        "paused": play_state.paused,
+        "loading": play_state.loading,
         "progress": elapsed,
         "duration": duration_seconds,
-        "queue_length": int(queue.get_queue_length() or 0),
+        "queue_length": snapshot.queue_length,
         "online_count": _music_channel_member_count(
             music,
             area,
@@ -867,41 +876,14 @@ def _status_summary(
 
 
 def _queue_summary(music, area: str) -> str:
-    queue = music._get_queue(area)
-    current = queue.get_current()
-    pending = queue.get_queue()
-    lines = ["Oopz 播放队列"]
-
-    if current:
-        lines.append(
-            f"├─ 正在播放：{current.get('name', '未知歌曲')} - "
-            f"{current.get('artists', '未知歌手')}"
-        )
-    else:
-        lines.append("├─ 正在播放：无")
-
-    if not pending:
-        lines.append("└─ 待播：空")
-        return "\n".join(lines)
-
-    lines.append(f"└─ 待播（{len(pending)}首）")
-    shown = pending[:10]
-    for index, song in enumerate(shown, 1):
-        branch = "└─" if index == len(shown) and len(pending) <= 10 else "├─"
-        lines.append(
-            f"   {branch} {index}. {song.get('name', '未知歌曲')} - "
-            f"{song.get('artists', '未知歌手')}"
-        )
-    if len(pending) > 10:
-        lines.append(f"   └─ ……另有 {len(pending) - 10} 首")
-    lines.append("发送：删除 <编号...>，例如“删除 2 5”")
-    return "\n".join(lines)
+    snapshot = _queue_service(music, area).snapshot()
+    return format_queue(snapshot)
 
 
 def _queue_panel(music, area: str, notice: str = "") -> dict:
-    queue = music._get_queue(area)
-    current = queue.get_current()
-    pending = queue.get_queue()
+    snapshot = _queue_service(music, area).snapshot()
+    current = queue_item_to_legacy(snapshot.current) if snapshot.current else None
+    pending = [queue_item_to_legacy(item) for item in snapshot.pending]
     message = _queue_summary(music, area)
     if notice:
         message = f"{notice}\n\n{message}"
@@ -924,50 +906,25 @@ def _queue_panel(music, area: str, notice: str = "") -> dict:
 
 
 def _parse_queue_positions(value: str) -> list[int] | None:
-    tokens = [token for token in re.split(r"[\s,，]+", value.strip()) if token]
-    if not tokens or len(tokens) > 10 or any(not token.isdigit() for token in tokens):
-        return None
-    positions = [int(token) for token in tokens]
-    return positions if all(position > 0 for position in positions) else None
+    return parse_queue_positions(value)
 
 
 def _remove_queue_items(music, area: str, positions: list[int]) -> dict:
-    queue = music._get_queue(area)
+    queue = _queue_service(music, area)
     try:
-        remove_positions = getattr(queue, "remove_positions", None)
-        if callable(remove_positions):
-            removed = remove_positions(positions)
-        else:
-            # The embedded legacy Redis queue exposes remove_from_queue with
-            # zero-based indexes. Validate every requested position before
-            # mutating, then delete from the end so earlier indexes stay valid.
-            pending = queue.get_queue()
-            normalized = sorted(set(positions))
-            if (
-                not normalized
-                or normalized[0] < 1
-                or normalized[-1] > len(pending)
-            ):
-                raise IndexError("queue position out of range")
-            removed = [pending[position - 1] for position in normalized]
-            for position in reversed(normalized):
-                if queue.remove_from_queue(position - 1) is False:
-                    raise RuntimeError(f"删除队列位置 {position} 失败")
-    except IndexError:
-        length = queue.get_queue_length()
+        removed = queue.remove(positions)
+    except QueuePositionError as exc:
+        length = exc.length
         if not length:
             return {"ok": False, "message": "待播队列为空，没有可删除的歌曲"}
         return {"ok": False, "message": f"编号超出范围，请输入 1-{length}"}
 
-    names = "、".join(str(song.get("name") or "未知歌曲") for song in removed)
+    names = "、".join(song.song.name for song in removed)
     return _queue_panel(music, area, f"已删除 {len(removed)} 首：{names}")
 
 
 def _search_keyword(command: str) -> str:
-    for prefix in ("搜索歌曲", "搜歌"):
-        if command.startswith(prefix):
-            return command[len(prefix):].strip()
-    return ""
+    return search_keyword(command)
 
 
 def _search_songs(music, keyword: str, requester_key: str) -> dict:
@@ -981,25 +938,12 @@ def _search_songs(music, keyword: str, requester_key: str) -> dict:
         return {"ok": False, "message": f"QQ音乐未找到：{keyword}"}
 
     songs = [dict(song, platform="qq") for song in results[:10]]
-    _search_sessions[requester_key] = {
-        "expires_at": time.monotonic() + _SEARCH_SESSION_TTL_SECONDS,
-        "songs": songs,
-    }
-
-    lines = [f'搜歌“{keyword}”', "├─ 候选歌曲"]
-    for index, song in enumerate(songs, 1):
-        branch = "└─" if index == len(songs) else "├─"
-        duration = str(song.get("durationText") or "")
-        suffix = f" [{duration}]" if duration else ""
-        lines.append(
-            f"│  {branch} {index}. {song.get('name', '未知歌曲')} - "
-            f"{song.get('artists', '未知歌手')}{suffix}"
-        )
-    lines.append("└─ 5分钟内发送：选歌 <编号>")
+    _search_sessions.put(requester_key, songs=songs)
+    candidates = tuple(display_song_from_legacy(song) for song in songs)
     return {
         "ok": True,
         "reply_type": "search_results",
-        "message": "\n".join(lines),
+        "message": format_search(keyword, candidates),
         "songs": [
             _qq_song_payload(song, index)
             for index, song in enumerate(songs, 1)
@@ -1016,9 +960,8 @@ def _select_song(
     voice_channel: str,
     bot_user: str,
 ) -> dict:
-    session = _search_sessions.get(requester_key)
-    if not session or time.monotonic() > float(session.get("expires_at") or 0):
-        _search_sessions.pop(requester_key, None)
+    session = _search_sessions.get_active(requester_key)
+    if not session:
         return {"ok": False, "message": "搜歌结果已失效，请重新发送：搜歌 <关键词>"}
 
     songs = session.get("songs") or []
@@ -1034,9 +977,14 @@ def _select_song(
             return {"ok": False, "message": f"进入 Oopz 语音频道失败: {detail}"}
 
     song = songs[index - 1]
-    play_result = music.play_song_choice(song, text_channel, area, bot_user)
-    if error := _music_action_error(play_result, "歌曲未能开始播放或加入队列"):
-        return {"ok": False, "message": error}
+    play_result = _playback_service(music).play_choice(
+        song,
+        channel=text_channel,
+        area=area,
+        requester_id=bot_user,
+    )
+    if not play_result.ok:
+        return {"ok": False, "message": play_result.message}
     _search_sessions.pop(requester_key, None)
     return {
         "ok": True,
@@ -1059,7 +1007,9 @@ def _execute_command_impl(command: str, requester_key: str) -> dict:
                 "message": "QQBot 的 Oopz 域、文字频道或语音频道尚未配置",
             }
 
-        if command in {"状态", "当前播放", "播放状态"}:
+        command_kind = exact_command_kind(command)
+
+        if command_kind is CommandKind.STATUS:
             playback = _playback_payload(
                 music,
                 area=area,
@@ -1089,10 +1039,10 @@ def _execute_command_impl(command: str, requester_key: str) -> dict:
                 return {"ok": False, "message": "用法：删除 <编号...>，例如“删除 2 5”"}
             return _remove_queue_items(music, area, positions)
 
-        if command in {"队列", "播放队列", "待播", "面板", "队列面板", "播放面板"}:
+        if command_kind is CommandKind.QUEUE:
             return _queue_panel(music, area)
 
-        if command in {"排行榜", "榜单", "QQ音乐排行榜", "QQ排行榜"}:
+        if command_kind is CommandKind.RANK_CATALOG:
             return _rank_catalog()
 
         rank_selection = re.fullmatch(r"(?:榜单点歌|榜单选歌)\s*(\d+)", command)
@@ -1173,87 +1123,88 @@ def _execute_command_impl(command: str, requester_key: str) -> dict:
                         "message": f"进入 Oopz 语音频道失败: {result['error']}",
                     }
 
-            play_result = music.play_song(
+            play_result = _playback_service(music).play_keyword(
                 keyword,
-                "qq",
-                text_channel,
-                area,
-                bot_user,
+                platform="qq",
+                channel=text_channel,
+                area=area,
+                requester_id=bot_user,
             )
-            if error := _music_action_error(
-                play_result,
-                "歌曲未能开始播放或加入队列",
-            ):
-                return {"ok": False, "message": error}
+            if not play_result.ok:
+                return {"ok": False, "message": play_result.message}
             return {
                 "ok": True,
-                "message": str(play_result.get("message") or f"已提交点歌：{keyword}"),
+                "message": play_result.message,
             }
 
-        if command in {"下一首", "切歌", "跳过", "下一个"}:
-            music.play_next(text_channel, area, bot_user)
-            return {"ok": True, "message": "已执行切歌"}
+        if command_kind is CommandKind.NEXT:
+            result = _playback_service(music).next(
+                channel=text_channel,
+                area=area,
+                requester_id=bot_user,
+            )
+            return {"ok": result.ok, "message": result.message}
 
-        if command in {"停止", "停止播放", "停", "关"}:
-            music.stop_play(text_channel, area)
-            return {"ok": True, "message": "已停止播放"}
+        if command_kind is CommandKind.STOP:
+            result = _playback_service(music).stop(channel=text_channel, area=area)
+            return {"ok": result.ok, "message": result.message}
 
-        if command in {"暂停", "暂停播放"}:
-            queue = music._get_queue(area)
-            current = queue.get_current()
+        if command_kind is CommandKind.PAUSE:
+            queue = _queue_service(music, area)
+            current = queue.current()
             if not current:
                 return {"ok": False, "message": "当前没有正在播放的歌曲"}
-            play_state = queue.get_play_state() or {}
-            if play_state.get("paused"):
+            play_state = queue.playback() or PlaybackState(
+                current_song_id=current.song.song_id
+            )
+            if play_state.paused:
                 return {"ok": True, "message": "播放已经暂停"}
             voice = getattr(music, "voice", None)
             if not voice or not voice.pause_audio():
                 return {"ok": False, "message": "暂停播放失败，请稍后重试"}
-            start_time = float(play_state.get("start_time") or time.time())
+            start_time = play_state.start_time or time.time()
             pause_elapsed = max(0.0, time.time() - start_time)
-            duration = float(play_state.get("duration") or 0)
+            duration = play_state.duration_seconds
             if duration:
                 pause_elapsed = min(pause_elapsed, duration)
-            play_state.update({
-                "paused": True,
-                "pause_elapsed": pause_elapsed,
-                "loading": False,
-            })
-            queue.set_play_state(play_state)
+            queue.set_playback(
+                replace(
+                    play_state,
+                    paused=True,
+                    pause_elapsed=pause_elapsed,
+                    loading=False,
+                )
+            )
             return {"ok": True, "message": "已暂停播放"}
 
-        if command in {"继续", "继续播放", "恢复", "恢复播放"}:
-            queue = music._get_queue(area)
-            current = queue.get_current()
+        if command_kind is CommandKind.RESUME:
+            queue = _queue_service(music, area)
+            current = queue.current()
             if not current:
                 return {"ok": False, "message": "当前没有可继续播放的歌曲"}
-            play_state = queue.get_play_state() or {}
-            if not play_state.get("paused"):
+            play_state = queue.playback() or PlaybackState(
+                current_song_id=current.song.song_id
+            )
+            if not play_state.paused:
                 return {"ok": True, "message": "歌曲正在播放"}
             voice = getattr(music, "voice", None)
             if not voice or not voice.resume_audio():
                 return {"ok": False, "message": "继续播放失败，请稍后重试"}
-            pause_elapsed = max(0.0, float(play_state.get("pause_elapsed") or 0))
+            pause_elapsed = max(0.0, float(play_state.pause_elapsed or 0))
             resumed_start_time = time.time() - pause_elapsed
-            play_state.update({
-                "paused": False,
-                "start_time": resumed_start_time,
-                "loading": False,
-            })
-            play_state.pop("pause_elapsed", None)
-            queue.set_play_state(play_state)
+            queue.set_playback(
+                replace(
+                    play_state,
+                    paused=False,
+                    start_time=resumed_start_time,
+                    loading=False,
+                    pause_elapsed=None,
+                )
+            )
             music._play_start_time = resumed_start_time
             return {"ok": True, "message": "已继续播放"}
 
-        if command in {
-            "频道成员",
-            "所有频道",
-            "频道列表",
-            "所有语音频道",
-            "语音频道",
-            "在线",
-            "在线成员",
-        }:
+        if command_kind is CommandKind.VOICE_CHANNELS:
             return {
                 "ok": True,
                 "message": _all_voice_channels_summary(
@@ -1263,12 +1214,7 @@ def _execute_command_impl(command: str, requester_key: str) -> dict:
                 ),
             }
 
-        if command in {
-            "语音成员",
-            "谁在频道",
-            "谁在听",
-            "有谁",
-        }:
+        if command_kind is CommandKind.VOICE_MEMBERS:
             return {
                 "ok": True,
                 "message": _voice_member_summary(
@@ -1279,7 +1225,7 @@ def _execute_command_impl(command: str, requester_key: str) -> dict:
                 ),
             }
 
-        if command in {"帮助", "菜单", "help", "/help"}:
+        if command_kind is CommandKind.HELP:
             return {
                 "ok": True,
                 "message": _HELP_MESSAGE,
@@ -1296,46 +1242,29 @@ def _execute_command(
     requester_key: str,
     command_id: str | None = None,
 ) -> dict:
-    """Run one command with a stable correlation ID across worker threads."""
-    correlation_id = ensure_command_id(command_id or current_command_id())
-    with command_context(correlation_id):
-        logger.info("开始处理命令 command=%r", command)
-        try:
-            result = _execute_command_impl(command, requester_key)
-        except Exception:
-            logger.exception("命令处理失败 command=%r", command)
-            raise
-        logger.info("命令处理完成 ok=%s", bool(result.get("ok")))
-        return result
+    """Compatibility export for callers that still consume dictionaries."""
+
+    requested_command_id = command_id or current_command_id()
+    service = CommandService(_execute_command_impl, logger=logger)
+    result = service.execute(
+        CommandRequest(
+            command=command,
+            requester_id=requester_key,
+            source="compat",
+            command_id=requested_command_id,
+        )
+    )
+    payload = command_result_to_legacy(result)
+    # Keep the historical direct-call contract: only HTTP callers that supply
+    # an explicit id receive it in the serialized result.  The ambient id is
+    # still used internally for correlated logging.
+    if command_id is None:
+        payload.pop("command_id", None)
+    return payload
 
 
 def _bridge_request_allowed(request: Request) -> JSONResponse | None:
-    client_host = request.client.host if request.client else ""
-    settings = get_settings()
-    private_client = False
-    try:
-        private_client = ipaddress.ip_address(client_host).is_private
-    except ValueError:
-        pass
-    allowed_client = client_host in _LOOPBACK_HOSTS or (
-        settings.bridge_private_network and private_client
-    )
-    if not allowed_client:
-        return JSONResponse(
-            {"ok": False, "message": "仅允许本机或已启用的容器内网访问"},
-            status_code=403,
-        )
-
-    supplied_token = request.headers.get("x-qqbot-bridge-token", "")
-    if not settings.bridge_token or not secrets.compare_digest(
-        supplied_token,
-        settings.bridge_token,
-    ):
-        return JSONResponse(
-            {"ok": False, "message": "桥接认证失败"},
-            status_code=401,
-        )
-    return None
+    return authorize_bridge_request(request, get_settings())
 
 
 def _command_event(command: str, result: dict, source: str) -> None:
@@ -1382,6 +1311,10 @@ def _health_entry(status: str, reason: str) -> dict[str, str]:
 def _runtime_status(runtime) -> tuple[str, str]:
     if runtime is None:
         return "starting", "OOPZ 运行时尚未初始化"
+    status_method = getattr(runtime, "status", None)
+    if callable(status_method):
+        state = status_method()
+        return str(state.status), state.reason or "OOPZ 运行时已就绪"
     if getattr(runtime, "_closed", None) is not None and runtime._closed.is_set():
         return "offline", "OOPZ 运行时已停止"
     startup_error = getattr(runtime, "_startup_error", None)
@@ -1395,6 +1328,10 @@ def _runtime_status(runtime) -> tuple[str, str]:
 def _websocket_status(runtime) -> tuple[str, str]:
     if runtime is None:
         return "starting", "OOPZ WebSocket 尚未初始化"
+    component_status = getattr(runtime, "component_status", None)
+    if callable(component_status):
+        state = component_status("websocket")
+        return str(state.status), state.reason or "OOPZ WebSocket 已连接并通过认证"
     context = getattr(runtime, "context", None)
     if context is not None:
         client = getattr(context, "client", None)
@@ -1415,6 +1352,10 @@ def _websocket_status(runtime) -> tuple[str, str]:
 def _voice_status(music, runtime) -> tuple[str, str]:
     if runtime is None:
         return "starting", "OOPZ 语音运行时尚未初始化"
+    component_status = getattr(runtime, "component_status", None)
+    if callable(component_status):
+        state = component_status("voice")
+        return str(state.status), state.reason or "OOPZ 语音频道已加入"
     if not bool(getattr(runtime, "ready", False)):
         return "unknown", "尚未建立 OOPZ 语音会话"
     if getattr(music, "_voice_channel_id", None):
@@ -1505,7 +1446,8 @@ def _service_health(music) -> dict[str, dict]:
 
 
 def _readiness_snapshot() -> dict:
-    components = _service_health(_music_handler())
+    music = _music_handler()
+    components = _service_health(music)
     required = (
         "internal_api",
         "legacy_core",
@@ -1515,7 +1457,16 @@ def _readiness_snapshot() -> dict:
         "qq_bot",
     )
     ok = all(components[name]["status"] == "ok" for name in required)
-    return {"ok": ok, "components": components}
+    runtime = getattr(music, "runtime", None) if music is not None else None
+    return {
+        "ok": ok,
+        "components": components,
+        "runtime_implementation": getattr(
+            runtime,
+            "implementation_name",
+            type(runtime).__name__ if runtime is not None else "uninitialized",
+        ),
+    }
 
 
 def _panel_snapshot() -> dict:
@@ -1536,6 +1487,7 @@ def _panel_snapshot() -> dict:
             channels = []
             channel_error = redact_secrets(str(exc), max_length=240)
     records = operations.snapshot()
+    runtime = getattr(music, "runtime", None)
     return {
         "ok": True,
         "playback": playback,
@@ -1548,6 +1500,11 @@ def _panel_snapshot() -> dict:
         "jm_jobs": records.get("jm_jobs", []),
         "jm_enabled": _env("QQBOT_JM_ENABLED").lower()
         in {"1", "true", "yes", "on"},
+        "runtime_implementation": getattr(
+            runtime,
+            "implementation_name",
+            type(runtime).__name__ if runtime is not None else "uninitialized",
+        ),
         "updated_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
 
@@ -1565,32 +1522,28 @@ async def qqbot_command(request: Request):
             status_code=400,
         )
 
-    command = str(body.get("command") or "").strip()
-    if not command:
+    command_id = ensure_command_id(body.get("command_id"))
+    try:
+        command_request = command_request_from_http(body, command_id=command_id)
+    except CommandInputError as exc:
         return JSONResponse(
-            {"ok": False, "message": "命令不能为空"},
-            status_code=400,
-        )
-    if len(command) > 150:
-        return JSONResponse(
-            {"ok": False, "message": "命令过长"},
+            {"ok": False, "message": str(exc)},
             status_code=400,
         )
 
-    command_id = ensure_command_id(body.get("command_id"))
     try:
-        requester_id = str(body.get("requester_id") or "anonymous").strip()
-        requester_name = str(body.get("requester_name") or requester_id).strip()
-        group_openid = str(body.get("group_openid") or "unknown-group").strip()
-        requester_key = f"{group_openid}:{requester_id}"
         with command_context(command_id):
             result = await asyncio.to_thread(
                 _execute_command,
-                command,
-                requester_key,
+                command_request.command,
+                command_request.requester_key,
                 command_id,
             )
-            _command_event(command, result, requester_name)
+            _command_event(
+                command_request.command,
+                result,
+                command_request.requester_name,
+            )
         return JSONResponse({**result, "command_id": command_id})
     except Exception as exc:
         with command_context(command_id):

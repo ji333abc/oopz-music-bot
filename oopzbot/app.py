@@ -119,15 +119,15 @@ def run(env_file: str | None = None) -> int:
         os.getenv("OOPZBOT_USE_LEGACY_CORE") or ""
     ).strip().lower() in {"1", "true", "yes", "on"}
     if legacy_core_enabled:
-        from .legacy_runtime import LegacyOopzCore
+        from .legacy_runtime import LegacyOopzRuntimeAdapter
 
-        runtime = LegacyOopzCore()
-        try:
-            controller = runtime.start()
-        except Exception:
+        runtime = LegacyOopzRuntimeAdapter()
+        result = runtime.start()
+        if not result.ok or runtime.music is None:
             runtime.close()
             music_service.close()
-            raise
+            raise RuntimeError(result.message or "旧版 OOPZ 运行时启动失败")
+        controller = runtime.music
     else:
         runtime = OopzRuntime()
         try:

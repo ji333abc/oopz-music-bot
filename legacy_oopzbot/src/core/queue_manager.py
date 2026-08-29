@@ -42,6 +42,18 @@ class _InMemoryRedis:
     def ping(self):
         return True
 
+    def has_transient_queue_state(self) -> bool:
+        """Whether switching back would discard a queue or active playback."""
+        with self._condition:
+            for key in tuple(self._expires_at):
+                self._is_expired(key)
+            active_values = any(
+                value
+                for key, value in self._kv.items()
+                if key.endswith(":current") or key.endswith(":play_state")
+            )
+            return any(self._lists.values()) or active_values
+
     def _get_list(self, key: str) -> list:
         return self._lists.setdefault(key, [])
 
@@ -126,6 +138,24 @@ class _InMemoryRedis:
                 new = [item for item in lst if item != value]
                 removed = len(lst) - len(new)
                 self._lists[key] = new
+            return removed
+
+    def remove_positions(self, key: str, indexes: list[int]) -> list:
+        """Atomically remove zero-based indexes and return original values."""
+        with self._condition:
+            items = list(self._lists.get(key, []))
+            normalized = sorted(set(indexes))
+            if (
+                not normalized
+                or normalized[0] < 0
+                or normalized[-1] >= len(items)
+            ):
+                raise IndexError("queue position out of range")
+            selected = set(normalized)
+            removed = [items[index] for index in normalized]
+            self._lists[key] = [
+                item for index, item in enumerate(items) if index not in selected
+            ]
             return removed
 
     # 字符串 / 通用键
@@ -264,6 +294,46 @@ class QueueManager:
             logger.warning("移除队列位置 %d 失败: %s", index, e)
             return False
 
+    def remove_positions(self, positions: list[int]) -> list[dict]:
+        """Atomically remove unique one-based pending positions."""
+        normalized = sorted(set(int(position) for position in positions))
+        if not normalized or normalized[0] < 1:
+            raise IndexError("queue position out of range")
+        indexes = [position - 1 for position in normalized]
+        r = self.redis
+        key = self._qkey()
+        if hasattr(r, "remove_positions"):
+            values = r.remove_positions(key, indexes)
+        else:
+            placeholder = f"__OOPZ_REMOVED__:{time.time_ns()}:{random.randrange(1 << 30)}"
+            script = """
+local key = KEYS[1]
+local marker = ARGV[1]
+local length = redis.call('LLEN', key)
+local removed = {}
+for i = 2, #ARGV do
+  local index = tonumber(ARGV[i])
+  if index < 0 or index >= length then
+    return redis.error_reply('QUEUE_POSITION_OUT_OF_RANGE')
+  end
+  removed[#removed + 1] = redis.call('LINDEX', key, index)
+end
+for i = #ARGV, 2, -1 do
+  redis.call('LSET', key, tonumber(ARGV[i]), marker)
+  redis.call('LREM', key, 1, marker)
+end
+return removed
+"""
+            try:
+                values = r.eval(script, 1, key, placeholder, *indexes)
+            except Exception as exc:
+                if "QUEUE_POSITION_OUT_OF_RANGE" in str(exc):
+                    raise IndexError("queue position out of range") from exc
+                raise
+        removed = [json.loads(value) for value in values]
+        logger.info("批量移除队列位置: %s", normalized)
+        return removed
+
     def pop_random(self) -> Optional[dict]:
         """随机弹出队列中的一首（用于随机播放模式）。
 
@@ -374,8 +444,8 @@ def get_redis_client(force_reset: bool = False):
     """返回全局共享 Redis 客户端；连接失败时统一回退到内存实现。
 
     内存降级不是永久的：之后每隔 _REDIS_RETRY_INTERVAL 秒在访问时探测一次
-    真实 Redis，恢复后自动切回（内存实现中的临时数据不迁移，播放队列等
-    会从 Redis 中的持久数据重新开始）。
+    真实 Redis。只有内存降级状态为空时才自动切回；存在临时队列或播放
+    状态时继续保持 degraded，避免静默丢弃或覆盖用户队列。
     """
     global _redis_client, _last_redis_retry
     with _redis_lock:
@@ -396,8 +466,14 @@ def get_redis_client(force_reset: bool = False):
                 _last_redis_retry = now
                 client = _try_connect_redis()
                 if client is not None:
-                    logger.info("Redis 已恢复，从内存队列切回 Redis")
-                    _redis_client = client
+                    if _redis_client.has_transient_queue_state():
+                        logger.error(
+                            "Redis 已恢复，但内存降级状态非空；为避免队列丢失，"
+                            "保持内存模式，待队列清空后再切回"
+                        )
+                    else:
+                        logger.info("Redis 已恢复，从空内存队列切回 Redis")
+                        _redis_client = client
 
         if _redis_client is None:
             _last_redis_retry = time.time()

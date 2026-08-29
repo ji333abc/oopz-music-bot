@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import types
 import unittest
@@ -78,6 +79,38 @@ class RedisFailoverTests(unittest.TestCase):
             client = queue_manager.get_redis_client()
 
         self.assertIs(client, recovered)
+
+    def test_recovery_does_not_discard_nonempty_memory_queue(self) -> None:
+        memory = queue_manager._InMemoryRedis()
+        memory.rpush("music:queue", '{"song_id":"1"}')
+        recovered = types.SimpleNamespace(ping=lambda: True)
+        queue_manager._redis_client = memory
+        queue_manager._last_redis_retry = 0.0
+
+        with patch.object(queue_manager, "_try_connect_redis", return_value=recovered):
+            client = queue_manager.get_redis_client()
+
+        self.assertIs(client, memory)
+        self.assertEqual(memory.llen("music:queue"), 1)
+
+    def test_memory_adapter_batch_remove_is_atomic_and_one_based(self) -> None:
+        memory = queue_manager._InMemoryRedis()
+        queue_manager._redis_client = memory
+        queue_manager._last_redis_retry = float("inf")
+        manager = queue_manager.QueueManager()
+        for index in range(1, 5):
+            memory.rpush("music:queue", json.dumps({"song_id": str(index)}))
+
+        with self.assertRaises(IndexError):
+            manager.remove_positions([1, 9])
+        self.assertEqual(manager.get_queue_length(), 4)
+
+        removed = manager.remove_positions([4, 2, 2])
+        self.assertEqual([item["song_id"] for item in removed], ["2", "4"])
+        self.assertEqual(
+            [item["song_id"] for item in manager.get_queue()],
+            ["1", "3"],
+        )
 
 
 if __name__ == "__main__":
