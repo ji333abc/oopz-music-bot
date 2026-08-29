@@ -100,6 +100,34 @@ class SettingsTests(unittest.TestCase):
             self.assertGreaterEqual(len(token), 32)
             self.assertIn(f"QQBOT_BRIDGE_TOKEN={token}", path.read_text(encoding="utf-8"))
 
+    def test_qqmusic_refresh_settings_parse_and_validate(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "QQ_MUSIC_CREDENTIAL_FILE": "data/custom.json",
+                "QQ_MUSIC_AUTO_REFRESH": "false",
+                "QQ_MUSIC_REFRESH_MIN_HOURS": "8",
+                "QQ_MUSIC_REFRESH_MAX_HOURS": "12",
+                "QQ_MUSIC_COOKIE_API_URL": "http://qqmusic:3201",
+            },
+            clear=True,
+        ):
+            settings = Settings.from_env()
+        self.assertEqual(settings.qq_music_credential_file, "data/custom.json")
+        self.assertFalse(settings.qq_music_auto_refresh)
+        self.assertEqual(settings.qq_music_refresh_min_hours, 8)
+        self.assertEqual(settings.qq_music_refresh_max_hours, 12)
+        self.assertEqual(settings.qq_music_cookie_api_url, "http://qqmusic:3201")
+
+    def test_qqmusic_refresh_window_must_be_ordered(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"QQ_MUSIC_REFRESH_MIN_HOURS": "25", "QQ_MUSIC_REFRESH_MAX_HOURS": "6"},
+            clear=True,
+        ):
+            errors = Settings.from_env().validate()
+        self.assertIn("QQ_MUSIC_REFRESH_MIN_HOURS 不能大于 MAX_HOURS", errors)
+
 
 if __name__ == "__main__":
     unittest.main()

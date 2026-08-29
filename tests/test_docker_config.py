@@ -13,6 +13,18 @@ class DockerConfigurationTests(unittest.TestCase):
         self.assertNotIn("Rain120/qq-music-api", dockerfile)
         self.assertIn("QQ_MUSIC_API_CONFIG_DIR=/opt/qqmusic-config", dockerfile)
 
+    def test_cookie_refresh_is_installed_and_wired_to_internal_endpoint(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
+        compose = (root / "compose.yaml").read_text(encoding="utf-8")
+        launcher = (root / "oopzbot" / "qqmusic_launcher.cjs").read_text(encoding="utf-8")
+
+        self.assertIn(".[jm,legacy,qqmusic-login]", dockerfile)
+        self.assertIn('QQ_MUSIC_COOKIE_API_PORT: "3201"', compose)
+        self.assertIn("QQ_MUSIC_COOKIE_API_URL: http://qqmusic:3201", compose)
+        self.assertIn("x-qqbot-bridge-token", launcher)
+        self.assertIn('"/internal/cookie"', launcher)
+
     def test_bot_image_and_compose_use_container_jm_paths(self) -> None:
         root = Path(__file__).resolve().parents[1]
         dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")

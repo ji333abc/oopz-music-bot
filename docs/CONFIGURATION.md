@@ -101,12 +101,29 @@ oopzbot discover --area-id <域ID>
 | `QQ_MUSIC_BASE_URL` | `http://127.0.0.1:3200` | 音乐 API 根地址 |
 | `QQ_MUSIC_SERVICE_DIR` | `.services/qqmusic-api` | 固定版本 API 的本地安装目录 |
 | `QQ_MUSIC_COOKIE` | 空 | 需要登录态或高音质时填写 |
+| `QQ_MUSIC_CREDENTIAL_FILE` | `data/qqmusic-credential.json` | 扫码登录凭证（含 refresh key，自动限制为仅当前用户可读） |
+| `QQ_MUSIC_AUTO_REFRESH` | `true` | 是否在后台自动刷新扫码凭证 |
+| `QQ_MUSIC_REFRESH_MIN_HOURS` / `MAX_HOURS` | `6` / `24` | 自动刷新间隔的下限和上限（小时） |
+| `QQ_MUSIC_COOKIE_API_URL` | 空 | QQ Music API 热更新地址；Compose 自动设置为 `http://qqmusic:3201` |
 | `QQ_MUSIC_QUALITY` | `320` | 主音质：`m4a/128/320/ape/flac` |
 | `QQ_MUSIC_FALLBACK_QUALITY` | `128` | 主地址不可用时的音质 |
 
 本地安装保持前三项默认值即可。Bot 会验证安装标记、固定提交和四个必需端点，然后在回环地址启动服务；QQ/OOPZ 凭据不会传给该子进程。
 
 只有明确使用自行维护的服务时才设置 `QQ_MUSIC_MANAGED=false` 并修改 `QQ_MUSIC_BASE_URL`。外部服务必须兼容 `/getSearchByKey`、`/getMusicPlay`、`/getSongInfo` 和 `/getLyric`。
+
+### 扫码登录与 Cookie 自动续期
+
+安装 `qqmusic-login` 可选组件后，只需扫码一次：
+
+```bash
+oopzbot qqmusic-login login
+oopzbot qqmusic-login status
+```
+
+完整凭证保存到 `QQ_MUSIC_CREDENTIAL_FILE`，派生的运行时 Cookie 保存到同目录的 `qqmusic-cookie.json`；两者都不应提交到版本库。服务会在 refresh key 或 musickey 的有效窗口内自适应刷新，并立即更新新旧音乐核心。
+
+Compose 部署会通过仅限内部网络的 `qqmusic:3201` 热更新 QQ Music API。Bot 本地托管 API 时也会尝试热更新，失败则重启它自己启动的子进程。使用第三方外部 API 时，Python 音乐核心仍会动态读取本地状态文件；如该 API 不提供热更新端点，需由其自身支持 Cookie 轮换。
 
 ## 可选后台任务
 

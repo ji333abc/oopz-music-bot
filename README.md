@@ -143,6 +143,12 @@ QQ_MUSIC_BASE_URL=http://127.0.0.1:3200
 
 `OOPZ_AGORA_APP_ID` 是旧版语音核心必需项，应从旧 `config.py` 的 `OOPZ_CONFIG["agora_app_id"]` 迁移；它不是 QQ AppID。
 
+## QQ 音乐 Cookie 自动续期
+
+安装器默认会安装扫码登录组件。运行一次 `oopzbot qqmusic-login login` 并用 QQ、微信或 QQ 音乐 App 扫码；凭证会保存到 `data/qqmusic-credential.json`，随后服务在后台刷新并将新 Cookie 分发给音乐 API。可使用 `status`、`refresh` 和 `cookie` 子命令检查或手动刷新。
+
+没有凭证文件时，`QQ_MUSIC_COOKIE` 仍是完全兼容的手动兜底。Compose 会热更新内部 `qqmusic` 容器；本地托管模式会热更新或重启其子进程；使用独立第三方 API 时需由该服务自行支持 Cookie 更新。详见 [配置说明](docs/CONFIGURATION.md#扫码登录与-cookie-自动续期)。
+
 完整说明见 [docs/CONFIGURATION.md](docs/CONFIGURATION.md)。Git 忽略规则覆盖 `.env`、Cookie、Token、日志和运行数据。
 
 ## 群命令

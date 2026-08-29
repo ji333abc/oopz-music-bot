@@ -3,6 +3,15 @@
 本项目遵循 Keep a Changelog 风格。当前发布版本由 `oopzbot.__version__` 提供，Panel
 `package.json` 和 Git Tag 必须在发布前与它保持一致。
 
+## [Unreleased]
+
+### Added
+
+- QQ 音乐扫码登录凭证存储、Cookie 状态文件、动态读取与后台自适应刷新。
+- `oopzbot qqmusic-login` 的登录、状态、刷新和 Cookie 查询命令。
+- QQ Music API 内部 Cookie 热更新端点，以及 Compose/本地托管的分发与重启兜底。
+- Panel 和健康快照中的 QQ 音乐凭证状态（不含任何密钥）。
+
 ## [0.1.1] - 2026-08-28
 
 ### Fixed
