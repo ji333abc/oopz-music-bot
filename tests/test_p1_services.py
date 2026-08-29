@@ -164,6 +164,9 @@ class _FakeMusic:
 class _FakeLegacyCore:
     def __init__(self, *, authenticated=True) -> None:
         self.music = _FakeMusic()
+        self.bot = SimpleNamespace(
+            config=SimpleNamespace(person_uid="legacy-person-uid")
+        )
         self._closed = SimpleNamespace(is_set=lambda: False)
         self.context = SimpleNamespace(
             client=SimpleNamespace(authenticated=authenticated, connected=authenticated)
@@ -192,6 +195,11 @@ class RuntimeAdapterTests(unittest.TestCase):
         )
         self.assertTrue(adapter.enter_voice(area="area", channel="voice").ok)
         self.assertTrue(adapter.play("https://audio", area="area", channel="voice").ok)
+
+    def test_adapter_preserves_password_login_person_uid_for_commands(self) -> None:
+        adapter = LegacyOopzRuntimeAdapter(_FakeLegacyCore())
+        self.assertTrue(adapter.start().ok)
+        self.assertEqual(adapter.bot.config.person_uid, "legacy-person-uid")
 
     def test_unstarted_adapter_returns_structured_operation_failure(self) -> None:
         adapter = LegacyOopzRuntimeAdapter(_FakeLegacyCore())

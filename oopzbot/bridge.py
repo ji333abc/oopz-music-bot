@@ -1004,7 +1004,7 @@ def _execute_command_impl(command: str, requester_key: str) -> dict:
         if not all((area, text_channel, voice_channel, bot_user)):
             return {
                 "ok": False,
-                "message": "QQBot 的 Oopz 域、文字频道或语音频道尚未配置",
+                "message": "QQBot 的 Oopz 域、文字频道、语音频道或机器人用户 ID 尚未配置",
             }
 
         command_kind = exact_command_kind(command)

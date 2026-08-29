@@ -180,6 +180,18 @@ class LegacyOopzRuntimeAdapter:
     def ready(self) -> bool:
         return self._core.ready
 
+    @property
+    def bot(self) -> Any:
+        """Preserve the legacy bot identity used by command configuration.
+
+        Password-login deployments may obtain ``person_uid`` from the
+        refreshed legacy credentials instead of defining ``OOPZ_PERSON_UID``
+        in ``.env``.  Keeping this compatibility property prevents the
+        runtime facade from hiding that identity.
+        """
+
+        return self._core.bot
+
     def start(self) -> OperationResult:
         if self.music is not None:
             if not self._core._closed.is_set():
