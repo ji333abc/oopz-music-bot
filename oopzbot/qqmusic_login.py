@@ -186,12 +186,19 @@ def cmd_cookie(args: argparse.Namespace, store: CredentialStore) -> int:
         uin=extract_uin(credential),
         expires_at=expiry_timestamp(credential),
         source="cli",
+        state_path=store.state_path,
     )
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="oopzbot qqmusic-login", description="QQ 音乐扫码登录 / Cookie 续期")
+    add_actions(parser)
+    return parser
+
+
+def add_actions(parser: argparse.ArgumentParser) -> None:
+    """Register the nested qqmusic-login actions on *parser*."""
     sub = parser.add_subparsers(dest="action", required=True)
 
     def add_common(p: argparse.ArgumentParser) -> None:
@@ -212,9 +219,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_cookie = sub.add_parser("cookie", help="输出当前 Cookie 字符串")
     add_common(p_cookie)
-
-    return parser
-
 
 def main(args: argparse.Namespace, env_file: str | None = None) -> int:
     from dotenv import load_dotenv

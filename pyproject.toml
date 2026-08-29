@@ -50,6 +50,9 @@ legacy = [
   "webdriver-manager==4.1.2",
   "websocket-client==1.9.0",
 ]
+qqmusic-login = [
+  "qqmusic-api-python>=0.7.2,<0.8",
+]
 
 [project.scripts]
 oopzbot = "oopzbot.app:main"

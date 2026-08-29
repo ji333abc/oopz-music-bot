@@ -24,7 +24,7 @@ COPY legacy_oopzbot ./legacy_oopzbot
 COPY tools/qqbot-uploader ./tools/qqbot-uploader
 COPY docker-entrypoint.sh /usr/local/bin/oopzbot-entrypoint
 
-RUN pip install --no-cache-dir ".[jm,legacy]" \
+RUN pip install --no-cache-dir ".[jm,legacy,qqmusic-login]" \
     && npm ci --omit=dev --prefix tools/qqbot-uploader \
     && groupadd --system oopzbot \
     && useradd --system --gid oopzbot --home-dir /app oopzbot \

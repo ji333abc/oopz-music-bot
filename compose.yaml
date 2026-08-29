@@ -19,6 +19,8 @@ services:
     restart: unless-stopped
     environment:
       QQ_MUSIC_COOKIE: ${QQ_MUSIC_COOKIE:-}
+      QQBOT_BRIDGE_TOKEN: ${QQBOT_BRIDGE_TOKEN:?QQBOT_BRIDGE_TOKEN is required}
+      QQ_MUSIC_COOKIE_API_PORT: "3201"
       QQ_MUSIC_API_CONFIG_DIR: /opt/qqmusic-config
     healthcheck:
       test:
@@ -41,6 +43,7 @@ services:
       OOPZ_VOICE_BROWSER_EXECUTABLE_PATH: /usr/bin/chromium
       QQ_MUSIC_MANAGED: "false"
       QQ_MUSIC_BASE_URL: http://qqmusic:3200
+      QQ_MUSIC_COOKIE_API_URL: http://qqmusic:3201
       OOPZBOT_BRIDGE_HOST: 0.0.0.0
       OOPZBOT_BRIDGE_PRIVATE_NETWORK: "true"
       OOPZBOT_PANEL_STATE_FILE: /app/data/panel-state.json

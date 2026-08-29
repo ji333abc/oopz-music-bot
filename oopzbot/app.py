@@ -111,6 +111,16 @@ def run(env_file: str | None = None) -> int:
     from .bridge import router, set_music_handler
     from .config import clear_settings_cache, get_settings
     from .controller import MusicController
+    from .qqmusic_credential import (
+        CookieRefreshService,
+        CredentialStore,
+        cookie_string,
+        expiry_timestamp,
+        extract_uin,
+        propagate_cookie,
+        publish_cookie,
+        require_qqmusic_api,
+    )
     from .qqmusic_service import ManagedQQMusicService
     from .runtime import OopzRuntime
 
@@ -120,6 +130,17 @@ def run(env_file: str | None = None) -> int:
     errors = settings.validate()
     if errors:
         raise SystemExit("配置无效：\n- " + "\n- ".join(errors))
+
+    credential_store = CredentialStore(Path(settings.qq_music_credential_file))
+    if loaded := credential_store.load():
+        credential, _ = loaded
+        publish_cookie(
+            cookie_string(credential),
+            uin=extract_uin(credential),
+            expires_at=expiry_timestamp(credential),
+            source="startup",
+            state_path=credential_store.state_path,
+        )
 
     music_service = ManagedQQMusicService(settings)
     music_service.start()
@@ -146,6 +167,27 @@ def run(env_file: str | None = None) -> int:
         controller = MusicController(settings, runtime)
     set_music_handler(controller)
 
+    refresh_service = None
+    if settings.qq_music_enabled and settings.qq_music_auto_refresh:
+        try:
+            require_qqmusic_api()
+        except RuntimeError as exc:
+            # Automatic refresh is optional; music playback continues with the
+            # manual QQ_MUSIC_COOKIE fallback when its extra is not installed.
+            import logging
+
+            logging.getLogger("QQMusicCredential").warning("自动续期未启动：%s", exc)
+        else:
+            refresh_service = CookieRefreshService(
+                store=credential_store,
+                min_hours=settings.qq_music_refresh_min_hours,
+                max_hours=settings.qq_music_refresh_max_hours,
+                on_publish=lambda _meta: propagate_cookie(
+                    settings, managed_service=music_service
+                ),
+            )
+            refresh_service.start()
+
     import uvicorn
     from fastapi import FastAPI
 
@@ -163,6 +205,8 @@ def run(env_file: str | None = None) -> int:
 
     def shutdown(*_args) -> None:
         server.should_exit = True
+        if refresh_service is not None:
+            refresh_service.stop()
         if legacy_core_enabled:
             runtime.close()
         else:
@@ -205,6 +249,10 @@ def build_parser() -> argparse.ArgumentParser:
     discover.add_argument("--area-id", help="只查询指定域的频道")
     discover.add_argument("--areas-only", action="store_true", help="只列出已加入的域")
     discover.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+    from .qqmusic_login import add_actions
+
+    qqmusic_login = subcommands.add_parser("qqmusic-login", help="QQ 音乐扫码登录与自动续期凭证管理")
+    add_actions(qqmusic_login)
     return parser
 
 
@@ -223,6 +271,10 @@ def main() -> None:
                 json_output=args.json,
             )
         )
+    if args.command == "qqmusic-login":
+        from .qqmusic_login import main as qqmusic_login_main
+
+        raise SystemExit(qqmusic_login_main(args, args.env_file))
     raise SystemExit(run(args.env_file))
 
 

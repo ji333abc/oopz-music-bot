@@ -15,9 +15,10 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import requests
 
@@ -127,6 +128,7 @@ class CredentialStore:
             uin=extract_uin(data),
             expires_at=expiry_timestamp(data),
             source=source,
+            state_path=self.state_path,
         )
 
     def summary(self) -> dict[str, Any]:
@@ -202,6 +204,7 @@ def publish_cookie(
     uin: str = "",
     expires_at: float = 0.0,
     source: str = "manual",
+    state_path: Path | None = None,
 ) -> dict[str, Any]:
     """写入 Cookie 状态文件并刷新进程内缓存，让所有消费方立即拿到新值。"""
     cookie = str(cookie or "").strip()
@@ -213,10 +216,11 @@ def publish_cookie(
         "updated_at": published_at,
         "source": source,
     }
+    path = Path(state_path or cookie_state_path())
     if cookie:
-        _atomic_write_json(cookie_state_path(), payload)
+        _atomic_write_json(path, payload)
     with _LOCK:
-        _cookie_cache.path = cookie_state_path()
+        _cookie_cache.path = path
         _cookie_cache.mtime = _state_mtime(_cookie_cache.path)
         _cookie_cache.cookie = cookie
         _cookie_cache.uin = uin
@@ -350,14 +354,14 @@ class CookieRefreshService:
         self.min_hours = min_hours
         self.max_hours = max_hours
         self.on_publish = on_publish
-        self._stop = asyncio.Event()
+        self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._state = _LoopState()
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
-        self._stop = asyncio.Event()
+        self._stop = threading.Event()
         self._thread = threading.Thread(
             target=self._thread_main,
             name="qqmusic-credential-refresh",
@@ -378,10 +382,7 @@ class CookieRefreshService:
     async def _run(self) -> None:
         while not self._stop.is_set():
             delay = await self._tick()
-            try:
-                await asyncio.wait_for(self._stop.wait(), timeout=delay)
-            except TimeoutError:
-                pass
+            await asyncio.to_thread(self._stop.wait, delay)
 
     async def _tick(self) -> float:
         if not _auto_refresh_enabled():
@@ -473,12 +474,11 @@ class CookieRefreshService:
             )
         index = min(self._state.backoff_index, len(NETWORK_BACKOFF_SECONDS) - 1)
         self._state.backoff_index += 1
-        level = "warning"
         if network_error and isinstance(exc, network_error):
             message = f"网络错误，稍后重试: {type(exc).__name__}"
         else:
             message = f"刷新异常，稍后重试: {type(exc).__name__}"
-        logger.log(level, "QQ 音乐凭证刷新失败: %s", message)
+        logger.warning("QQ 音乐凭证刷新失败: %s", message)
         return RefreshOutcome(
             ok=False,
             kind="network_error",

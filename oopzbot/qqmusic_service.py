@@ -85,8 +85,8 @@ class ManagedQQMusicService:
         self.base_url = settings.qq_music_base_url.rstrip("/")
         self.directory = service_directory(settings.qq_music_service_dir)
         # 自动续期发布的 Cookie 优先，QQ_MUSIC_COOKIE 只是手动兜底。
-        self.cookie = current_cookie(settings.qq_music_cookie)
-        self.cookie_api_token = settings.bridge_token
+        self.cookie = current_cookie(getattr(settings, "qq_music_cookie", ""))
+        self.cookie_api_token = getattr(settings, "bridge_token", "")
         self.timeout = timeout
         self.process: subprocess.Popen | None = None
 

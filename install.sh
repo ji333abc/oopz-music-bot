@@ -6,6 +6,8 @@ cd "$project_dir"
 
 with_jm=0
 with_jm_set=0
+with_qqmusic_login=1
+qqmusic_login_set=0
 skip_browser=0
 browser_set=0
 non_interactive=0
@@ -20,6 +22,7 @@ usage() {
 选项：
   --with-jm       安装可选 JM 文件任务及 Node.js 上传器
   --without-jm    仅安装音乐机器人
+  --without-qqmusic-login  不安装扫码登录和自动 Cookie 续期组件
   --skip-browser  跳过 Playwright Chromium 下载
   --external-music-api  不安装固定版本 QQ 音乐 API，使用已有服务
   --managed-music-api   安装并自动托管固定版本 QQ 音乐 API（默认）
@@ -38,6 +41,10 @@ while [ "$#" -gt 0 ]; do
     --without-jm)
       with_jm=0
       with_jm_set=1
+      ;;
+    --without-qqmusic-login)
+      with_qqmusic_login=0
+      qqmusic_login_set=1
       ;;
     --skip-browser)
       skip_browser=1
@@ -100,6 +107,11 @@ if [ "$non_interactive" -eq 0 ] && [ -t 0 ]; then
       with_jm=1
     fi
   fi
+  if [ "$qqmusic_login_set" -eq 0 ]; then
+    if ! confirm '是否安装 QQ 音乐扫码登录与自动 Cookie 续期组件？' yes; then
+      with_qqmusic_login=0
+    fi
+  fi
   if [ "$browser_set" -eq 0 ]; then
     if ! confirm '是否下载机器人语音播放所需的 Chromium？' yes; then
       skip_browser=1
@@ -146,8 +158,13 @@ venv_oopzbot="$project_dir/.venv/bin/oopzbot"
 
 printf '%s\n' '[2/6] 安装 Python 依赖'
 "$venv_python" -m pip install --upgrade pip
-if [ "$with_jm" -eq 1 ]; then
-  "$venv_python" -m pip install ".[jm]"
+extras=
+[ "$with_jm" -eq 1 ] && extras=jm
+if [ "$with_qqmusic_login" -eq 1 ]; then
+  extras=${extras:+$extras,}qqmusic-login
+fi
+if [ -n "$extras" ]; then
+  "$venv_python" -m pip install ".[$extras]"
 else
   "$venv_python" -m pip install "."
 fi

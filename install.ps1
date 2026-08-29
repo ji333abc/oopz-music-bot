@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [switch]$WithJm,
+    [switch]$WithoutQqMusicLogin,
     [switch]$SkipBrowser,
     [switch]$ExternalMusicApi,
     [switch]$NonInteractive,
@@ -44,6 +45,7 @@ function Read-YesNo {
 
 $interactive = -not $NonInteractive -and -not [Console]::IsInputRedirected
 $installJm = [bool]$WithJm
+$installQqMusicLogin = -not [bool]$WithoutQqMusicLogin
 $installBrowser = -not [bool]$SkipBrowser
 $installMusicApi = -not [bool]$ExternalMusicApi
 if ($interactive) {
@@ -51,6 +53,9 @@ if ($interactive) {
     Write-Host "=== OOPZ Music Bot Setup ==="
     if (-not $PSBoundParameters.ContainsKey("WithJm")) {
         $installJm = Read-YesNo "Install the optional JM file tasks?" $false
+    }
+    if (-not $PSBoundParameters.ContainsKey("WithoutQqMusicLogin")) {
+        $installQqMusicLogin = Read-YesNo "Install QQ Music QR login and automatic cookie refresh?" $true
     }
     if (-not $PSBoundParameters.ContainsKey("SkipBrowser")) {
         $installBrowser = Read-YesNo "Download Chromium for voice playback?" $true
@@ -97,11 +102,11 @@ $venvBot = Join-Path $projectDir ".venv\Scripts\oopzbot.exe"
 
 Write-Host "[2/6] Installing Python dependencies"
 Invoke-Native $venvPython -ArgumentList @("-m", "pip", "install", "--upgrade", "pip")
-if ($installJm) {
-    Invoke-Native $venvPython -ArgumentList @("-m", "pip", "install", ".[jm]")
-} else {
-    Invoke-Native $venvPython -ArgumentList @("-m", "pip", "install", ".")
-}
+$extras = @()
+if ($installJm) { $extras += "jm" }
+if ($installQqMusicLogin) { $extras += "qqmusic-login" }
+$package = if ($extras.Count) { ".[" + ($extras -join ",") + "]" } else { "." }
+Invoke-Native $venvPython -ArgumentList @("-m", "pip", "install", $package)
 
 if (-not $env:PLAYWRIGHT_BROWSERS_PATH) {
     $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $projectDir ".playwright"
