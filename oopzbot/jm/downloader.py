@@ -6,6 +6,27 @@ import json
 import subprocess
 from pathlib import Path
 
+_PACKAGED_WORKER = Path(__file__).resolve().parents[1] / "jm_worker.py"
+_PACKAGED_WORKER_MODULE = "oopzbot.jm_worker"
+
+
+def _worker_command(python: str, worker: str, *arguments: str) -> list[str]:
+    """Build a worker command without shadowing the stdlib ``http`` package.
+
+    Running ``/app/oopzbot/jm_worker.py`` as a script puts ``/app/oopzbot``
+    first on ``sys.path``.  That makes the local ``oopzbot/http`` package mask
+    Python's standard-library ``http`` package.  The packaged worker must be
+    started as a module instead.  Retain support for an explicitly configured
+    external worker script for legacy deployments.
+    """
+    try:
+        is_packaged_worker = Path(worker).resolve() == _PACKAGED_WORKER
+    except OSError:
+        is_packaged_worker = False
+    if is_packaged_worker:
+        return [python, "-m", _PACKAGED_WORKER_MODULE, *arguments]
+    return [python, worker, *arguments]
+
 
 def inspect_album(
     *,
@@ -16,7 +37,7 @@ def inspect_album(
     timeout_seconds: int,
 ) -> int:
     result = subprocess.run(
-        [python, worker, "--inspect", album_id],
+        _worker_command(python, worker, "--inspect", album_id),
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
@@ -48,7 +69,7 @@ def download_album(
     log_path = job_dir / "download.log"
     with log_path.open("w", encoding="utf-8") as log_file:
         result = subprocess.run(
-            [python, worker, album_id, str(job_dir)],
+            _worker_command(python, worker, album_id, str(job_dir)),
             stdin=subprocess.DEVNULL,
             stdout=log_file,
             stderr=subprocess.STDOUT,
