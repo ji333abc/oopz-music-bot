@@ -7,12 +7,12 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Optional
 
 import requests
-
 from core.http_constants import HTTP_TIMEOUT_DEFAULT
 from core.logger_config import get_logger
+
+from oopzbot.metrics import metrics
 
 logger = get_logger("QQMusic")
 
@@ -92,6 +92,7 @@ class QQMusic:
             or cfg.get("fallback_quality"),
             default="128",
         )
+        self.last_error: dict[str, str] | None = None
         self._session = requests.Session()
         if self.enabled and not self.base_url:
             logger.warning("QQ 音乐 API 地址未配置 (QQ_MUSIC_CONFIG.base_url)")
@@ -101,9 +102,16 @@ class QQMusic:
         quality = str(value or "").strip().lower()
         return quality if quality in _SUPPORTED_QUALITIES else default
 
-    def _get(self, path: str, params: dict | None = None) -> Optional[dict]:
+    def _get(self, path: str, params: dict | None = None) -> dict | None:
+        timer = metrics.timer()
         if not self.base_url:
+            self.last_error = {"type": "config", "message": "QQ音乐接口未配置"}
+            metrics.record_external(
+                service="qqmusic", operation=path, result_kind="config",
+                ok=False, duration_ms=timer.elapsed_ms(),
+            )
             return None
+        self.last_error = None
         try:
             headers = {}
             cookie = _current_cookie(self.cookie)
@@ -116,9 +124,55 @@ class QQMusic:
                 timeout=HTTP_TIMEOUT_DEFAULT,
             )
             response.raise_for_status()
-            return response.json()
+            try:
+                payload = response.json()
+            except ValueError:
+                self.last_error = {
+                    "type": "parse_error",
+                    "message": "QQ音乐接口返回格式异常，请稍后重试",
+                }
+                metrics.record_external(
+                    service="qqmusic", operation=path, result_kind="parse_error",
+                    ok=False, duration_ms=timer.elapsed_ms(),
+                )
+                return None
+            metrics.record_external(
+                service="qqmusic", operation=path, result_kind="ok",
+                ok=True, duration_ms=timer.elapsed_ms(),
+            )
+            return payload
+        except requests.Timeout:
+            self.last_error = {
+                "type": "timeout",
+                "message": "QQ音乐接口请求超时，请稍后重试",
+            }
+            metrics.record_external(
+                service="qqmusic", operation=path, result_kind="timeout",
+                ok=False, duration_ms=timer.elapsed_ms(),
+            )
+            return None
+        except requests.HTTPError as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", "unknown")
+            kind = "cookie_invalid" if status in {401, 403} else "upstream_http"
+            self.last_error = {
+                "type": kind,
+                "message": f"QQ音乐接口异常（HTTP {status}），请稍后重试",
+            }
+            metrics.record_external(
+                service="qqmusic", operation=path, result_kind=kind,
+                ok=False, duration_ms=timer.elapsed_ms(),
+            )
+            return None
         except Exception as exc:
+            self.last_error = {
+                "type": "network",
+                "message": "QQ音乐接口连接失败，请稍后重试",
+            }
             logger.error("QQ 音乐 API 请求失败: %s", exc)
+            metrics.record_external(
+                service="qqmusic", operation=path, result_kind="network",
+                ok=False, duration_ms=timer.elapsed_ms(),
+            )
             return None
 
     @staticmethod
@@ -149,7 +203,7 @@ class QQMusic:
                 return songs
         return []
 
-    def search(self, keyword: str, limit: int = 1) -> Optional[dict]:
+    def search(self, keyword: str, limit: int = 1) -> dict | None:
         data = self._get(
             "/getSearchByKey",
             params={"key": keyword, "limit": limit, "page": 1},
@@ -220,7 +274,8 @@ class QQMusic:
 
         return str(url) if url else ""
 
-    def get_song_url(self, song_id, quality: str | None = None, **_ignored) -> Optional[str]:
+    def get_song_url(self, song_id, quality: str | None = None, **_ignored) -> str | None:
+        timer = metrics.timer()
         song_id = str(song_id)
         selected_quality = self._normalize_quality(
             quality,
@@ -241,25 +296,45 @@ class QQMusic:
             )
             url = self._extract_play_url(data or {}, song_id)
             if url:
+                metrics.record_external(
+                    service="qqmusic", operation="playability", result_kind="playable",
+                    ok=True, duration_ms=timer.elapsed_ms(),
+                )
                 return url
 
         # 最后兼容不支持新版接口的旧服务。
         data = self._get("/song/url", params={"id": song_id})
         url = self._extract_play_url(data or {}, song_id)
 
+        metrics.record_external(
+            service="qqmusic", operation="playability",
+            result_kind="dependency_error" if self.last_error else "unplayable",
+            ok=False, duration_ms=timer.elapsed_ms(),
+        )
         return url or None
 
-    def get_fallback_song_url(self, song_id) -> Optional[str]:
+    def diagnostics(self) -> dict:
+        return {
+            "service": "qqmusic",
+            "last_error": dict(self.last_error or {}),
+            "endpoints": {
+                key: value
+                for key, value in metrics.summaries().items()
+                if key.startswith("qqmusic:")
+            },
+        }
+
+    def get_fallback_song_url(self, song_id) -> str | None:
         """获取 Python 本地下载使用的低码率备用链接。"""
         return self.get_song_url(song_id, quality=self.fallback_quality)
 
-    def get_song_detail(self, song_id) -> Optional[dict]:
+    def get_song_detail(self, song_id) -> dict | None:
         data = self._get("/getSongInfo", params={"songmid": str(song_id)})
         if not data or not data.get("data"):
             return None
         return self._parse_song(data["data"])
 
-    def get_lyric(self, song_id) -> Optional[str]:
+    def get_lyric(self, song_id) -> str | None:
         data = self._get("/getLyric", params={"songmid": str(song_id)})
         lyric = self._extract_lyric(data or {})
         return lyric if lyric and "[" in lyric else None
@@ -322,7 +397,7 @@ class QQMusic:
         song["url"] = url
         return {"code": "success", "message": "", "data": song}
 
-    def _parse_song(self, song: dict) -> Optional[dict]:
+    def _parse_song(self, song: dict) -> dict | None:
         if not song:
             return None
 

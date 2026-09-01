@@ -1,19 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import QueueSortableList, { type QueueSong } from "../components/QueueSortableList";
 
 type PanelSection = "overview" | "music" | "queue" | "members" | "jm";
-type Song = {
-  id?: string;
-  index?: number;
-  name?: string;
-  artists?: string;
-  album?: string;
-  cover?: string;
-  platform?: string;
-  duration?: number | string;
-  durationText?: string;
-};
+type Song = QueueSong;
 type Playback = Song & {
   playing: boolean;
   paused: boolean;
@@ -61,6 +52,8 @@ type CommandResult = {
   message?: string;
   songs?: Song[];
   queue_all?: Song[];
+  queue_version?: number;
+  code?: string;
 };
 type ResourceMetric = { total: number; used: number; free: number; percent: number };
 type Infrastructure = {
@@ -71,6 +64,11 @@ type Infrastructure = {
   disk?: ResourceMetric | null;
   memory?: ResourceMetric | null;
 };
+type LatencyMetric = { count?: number; success?: number; failure?: number; last_ms?: number | null; p50_ms?: number | null; p95_ms?: number | null; success_rate?: number | null; result_counts?: Record<string, number> };
+type CommandTiming = { command_id?: string; source?: string; kind?: string; ok?: boolean; error_kind?: string; duration_ms?: number; created_at?: string };
+type FailureItem = { component?: string; error_kind?: string; message?: string; command_id?: string; created_at?: string };
+type PlaybackHistoryItem = { song_id?: string; name?: string; artists?: string; platform?: string; source?: string; result?: string; error_kind?: string; started_at?: string; ended_at?: string };
+type CredentialDiagnostic = { state?: string; has_cookie?: boolean; uin?: string; expires_at?: number };
 
 const emptyPlayback: Playback = {
   name: "",
@@ -100,6 +98,7 @@ const componentNames: Record<string, string> = {
   qqmusic_credential: "QQ 音乐凭证",
   qq_bot: "QQ 机器人",
   uploader: "QQ 上传器",
+  jm_worker: "JM Worker",
 };
 const phaseNames: Record<string, string> = {
   inspecting: "读取元数据",
@@ -139,17 +138,27 @@ function formatMoment(value?: string): string {
   return date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
-function normalizeSong(song: Song): Song {
+function normalizeSong(song: Song, clientKey?: string): Song {
   return {
     ...song,
     durationText: song.durationText || String(song.duration || ""),
     duration: durationSeconds(song.duration),
+    clientKey: song.clientKey || clientKey,
   };
+}
+
+function moveItem<T>(items: T[], source: number, target: number): T[] {
+  const next = [...items];
+  const [item] = next.splice(source, 1);
+  next.splice(target, 0, item);
+  return next;
 }
 
 export default function Home() {
   const [activeSection, setActiveSection] = useState<PanelSection>("overview");
   const [connected, setConnected] = useState(false);
+  const [sseConnected, setSseConnected] = useState(false);
+  const [fallbackPollMs, setFallbackPollMs] = useState(60_000);
   const [statusMessage, setStatusMessage] = useState("等待首次同步");
   const [lastUpdated, setLastUpdated] = useState("尚未同步");
   const [operator, setOperator] = useState("受保护控制端");
@@ -157,6 +166,9 @@ export default function Home() {
   const [playback, setPlayback] = useState<Playback>(emptyPlayback);
   const [elapsed, setElapsed] = useState(0);
   const [queue, setQueue] = useState<Song[]>([]);
+  const [queueVersion, setQueueVersion] = useState(0);
+  const [queueBusy, setQueueBusy] = useState(false);
+  const [dragState, setDragState] = useState<{ original: Song[]; version: number } | null>(null);
   const [channels, setChannels] = useState<VoiceChannel[]>([]);
   const [channelError, setChannelError] = useState("");
   const [health, setHealth] = useState<Record<string, ComponentHealth>>({});
@@ -170,6 +182,14 @@ export default function Home() {
   const [toast, setToast] = useState("");
   const [infrastructure, setInfrastructure] = useState<Infrastructure | null>(null);
   const [infrastructureLoading, setInfrastructureLoading] = useState(true);
+  const [externalMetrics, setExternalMetrics] = useState<Record<string, LatencyMetric>>({});
+  const [searchCache, setSearchCache] = useState<Record<string, number | boolean>>({});
+  const [commandHistory, setCommandHistory] = useState<CommandTiming[]>([]);
+  const [playbackHistory, setPlaybackHistory] = useState<PlaybackHistoryItem[]>([]);
+  const [failureHistory, setFailureHistory] = useState<FailureItem[]>([]);
+  const [credentialDiagnostic, setCredentialDiagnostic] = useState<CredentialDiagnostic>({});
+  const refreshRef = useRef<() => void>(() => undefined);
+  const snapshotRef = useRef<(data: Record<string, unknown>) => void>(() => undefined);
 
   const clearRealtimeState = useCallback((message: string) => {
     setConnected(false);
@@ -177,21 +197,23 @@ export default function Home() {
     setPlayback(emptyPlayback);
     setElapsed(0);
     setQueue([]);
+    setQueueVersion(0);
     setChannels([]);
     setChannelError("");
     setHealth({});
     setEvents([]);
     setJmJobs([]);
+    setExternalMetrics({});
+    setSearchCache({});
+    setCommandHistory([]);
+    setPlaybackHistory([]);
+    setFailureHistory([]);
+    setCredentialDiagnostic({});
   }, []);
 
-  const refresh = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      const response = await fetch("/api/state", { cache: "no-store", credentials: "same-origin" });
-      const data = await response.json();
-      if (!response.ok || !data.ok) throw new Error(String(data.message || "状态接口不可用"));
-      const rawPlayback = data.playback || {};
-      const current = rawPlayback.current ? normalizeSong(rawPlayback.current) : {};
+  const applySnapshot = useCallback((data: Record<string, unknown>) => {
+      const rawPlayback = (data.playback || {}) as Record<string, unknown>;
+      const current = rawPlayback.current ? normalizeSong(rawPlayback.current as Song) : {};
       const nextPlayback: Playback = {
         ...emptyPlayback,
         ...current,
@@ -203,29 +225,83 @@ export default function Home() {
       };
       setPlayback(nextPlayback);
       setElapsed(nextPlayback.progress);
-      setQueue(Array.isArray(data.queue) ? data.queue.map(normalizeSong) : []);
-      setChannels(Array.isArray(data.channels) ? data.channels : []);
+      if (!dragState && !queueBusy) {
+        const version = Number(data.queue_version) || 0;
+        setQueue(Array.isArray(data.queue) ? data.queue.map((song: Song, index: number) => normalizeSong(song, `${version}:${index}:${song.id || song.name || "song"}`)) : []);
+        setQueueVersion(version);
+      }
+      setChannels(Array.isArray(data.channels) ? data.channels as VoiceChannel[] : []);
       setChannelError(String(data.channel_error || ""));
       setHealth(data.health && typeof data.health === "object" ? data.health : {});
-      setEvents(Array.isArray(data.events) ? data.events : []);
-      setJmJobs(Array.isArray(data.jm_jobs) ? data.jm_jobs : []);
+      setEvents(Array.isArray(data.events) ? data.events as PanelEvent[] : []);
+      setJmJobs(Array.isArray(data.jm_jobs) ? data.jm_jobs as JmJob[] : []);
       setJmEnabled(Boolean(data.jm_enabled));
+      setExternalMetrics(data.external_metrics && typeof data.external_metrics === "object" ? data.external_metrics : {});
+      setSearchCache(data.search_cache && typeof data.search_cache === "object" ? data.search_cache : {});
+      setCommandHistory(Array.isArray(data.command_history) ? data.command_history as CommandTiming[] : []);
+      setPlaybackHistory(Array.isArray(data.playback_history) ? data.playback_history as PlaybackHistoryItem[] : []);
+      setFailureHistory(Array.isArray(data.failure_history) ? data.failure_history as FailureItem[] : []);
+      setCredentialDiagnostic(data.qqmusic_credential && typeof data.qqmusic_credential === "object" ? data.qqmusic_credential as CredentialDiagnostic : {});
       setOperator(String(data.operator || "受保护控制端"));
+      setFallbackPollMs(Math.min(300, Math.max(10, Number(data.sse_fallback_poll_seconds) || 60)) * 1000);
       setConnected(true);
-      setStatusMessage("实时数据已连接");
+      setStatusMessage(sseConnected ? "实时事件流已连接" : "状态已同步，使用回退轮询");
       setLastUpdated(new Date(data.updated_at || Date.now()).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+  }, [dragState, queueBusy, sseConnected]);
+
+  const refresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      const response = await fetch("/api/state", { cache: "no-store", credentials: "same-origin" });
+      const data = await response.json() as Record<string, unknown>;
+      if (!response.ok || !data.ok) throw new Error(String(data.message || "状态接口不可用"));
+      applySnapshot(data);
     } catch (error) {
       clearRealtimeState(error instanceof Error ? error.message : "无法连接后端");
     } finally {
       setRefreshing(false);
     }
-  }, [clearRealtimeState]);
+  }, [applySnapshot, clearRealtimeState]);
+  useEffect(() => {
+    refreshRef.current = refresh;
+    snapshotRef.current = applySnapshot;
+  }, [applySnapshot, refresh]);
 
   useEffect(() => {
-    refresh();
-    const timer = window.setInterval(refresh, 10_000);
+    if (sseConnected) return;
+    refreshRef.current();
+    const timer = window.setInterval(() => refreshRef.current(), fallbackPollMs);
     return () => window.clearInterval(timer);
-  }, [refresh]);
+  }, [fallbackPollMs, sseConnected]);
+
+  useEffect(() => {
+    const source = new EventSource("/api/events", { withCredentials: true });
+    const onState = () => refreshRef.current();
+    const onSnapshot = (event: MessageEvent<string>) => {
+      try {
+        snapshotRef.current(JSON.parse(event.data) as Record<string, unknown>);
+      } catch {
+        refreshRef.current();
+      }
+    };
+    source.onopen = () => {
+      setSseConnected(true);
+      setStatusMessage("实时事件流已连接");
+    };
+    source.onerror = () => {
+      setSseConnected(false);
+      setStatusMessage("事件流中断，已切换轮询");
+    };
+    source.addEventListener("snapshot", onSnapshot);
+    source.addEventListener("state", onState);
+    source.addEventListener("reset", onState);
+    return () => {
+      source.removeEventListener("snapshot", onSnapshot);
+      source.removeEventListener("state", onState);
+      source.removeEventListener("reset", onState);
+      source.close();
+    };
+  }, []);
 
   const refreshInfrastructure = useCallback(async () => {
     setInfrastructureLoading(true);
@@ -262,14 +338,19 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  const sendCommand = async (command: string): Promise<CommandResult | null> => {
+  const sendCommand = async (command: string, expectedVersion?: number): Promise<CommandResult | null> => {
     try {
       const response = await fetch("/api/command", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command }),
+        body: JSON.stringify({ command, ...(expectedVersion === undefined ? {} : { expected_version: expectedVersion }) }),
       });
       const result = (await response.json()) as CommandResult;
+      if (Array.isArray(result.queue_all)) {
+        const nextVersion = Number(result.queue_version) || queueVersion;
+        setQueue(result.queue_all.map((song, index) => normalizeSong(song, `${nextVersion}:${index}:${song.id || song.name || "song"}`)));
+        setQueueVersion(nextVersion);
+      }
       if (!response.ok || !result.ok) throw new Error(result.message || "命令执行失败");
       setToast(result.message || `已执行：${command}`);
       window.setTimeout(refresh, 400);
@@ -282,9 +363,66 @@ export default function Home() {
 
   const removeQueueItem = async (index: number) => {
     setQueueRemoving(index);
-    const result = await sendCommand(`删除 ${index}`);
-    if (Array.isArray(result?.queue_all)) setQueue(result.queue_all.map(normalizeSong));
+    const result = await sendCommand(`删除 ${index}`, queueVersion);
+    if (Array.isArray(result?.queue_all)) {
+      const nextVersion = Number(result.queue_version) || queueVersion;
+      setQueue(result.queue_all.map((song, itemIndex) => normalizeSong(song, `${nextVersion}:${itemIndex}:${song.id || song.name || "song"}`)));
+      setQueueVersion(nextVersion);
+    }
     setQueueRemoving(null);
+  };
+
+  const clearQueue = async () => {
+    if (!queue.length || !window.confirm("确认清空全部待播歌曲？")) return;
+    setQueueBusy(true);
+    const result = await sendCommand("清空队列", queueVersion);
+    if (Array.isArray(result?.queue_all)) {
+      setQueue(result.queue_all.map(normalizeSong));
+      setQueueVersion(Number(result.queue_version) || queueVersion);
+    }
+    setQueueBusy(false);
+  };
+
+  const commitQueueMove = async (from: number, to: number, version: number, original: Song[]) => {
+    if (from === to) return;
+    setQueueBusy(true);
+    try {
+      const response = await fetch("/api/command", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command: `移动 ${from + 1} ${to + 1}`, expected_version: version }),
+      });
+      const result = (await response.json()) as CommandResult;
+      if (Array.isArray(result.queue_all)) {
+        const nextVersion = Number(result.queue_version) || version;
+        setQueue(result.queue_all.map((song, index) => normalizeSong(song, `${nextVersion}:${index}:${song.id || song.name || "song"}`)));
+        setQueueVersion(nextVersion);
+      } else if (!response.ok || !result.ok) {
+        setQueue(original);
+      }
+      if (!response.ok || !result.ok) throw new Error(result.message || "队列排序失败");
+      setToast(result.message || "队列顺序已更新");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "队列排序失败");
+    } finally {
+      setQueueBusy(false);
+    }
+  };
+
+  const beginQueueDrag = () => {
+    setDragState({ original: queue, version: queueVersion });
+  };
+
+  const cancelQueueDrag = () => {
+    if (dragState) setQueue(dragState.original);
+    setDragState(null);
+  };
+
+  const finishQueueDrag = (from: number, to: number) => {
+    const completed = dragState || { original: queue, version: queueVersion };
+    setQueue(moveItem(completed.original, from, to));
+    setDragState(null);
+    void commitQueueMove(from, to, completed.version, completed.original);
   };
 
   const searchSongs = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -346,7 +484,7 @@ export default function Home() {
       <main className="main-content section-target" id="section-overview" tabIndex={-1}>
         <header className="topbar">
           <div><p className="eyebrow">SYSTEM OVERVIEW</p><h1>机器人控制面板</h1><p>{statusMessage}</p></div>
-          <div className="top-actions"><div className={`connection ${connected ? "connected" : "demo"}`}><span />{connected ? "实时在线" : "服务不可用"}<small>{lastUpdated}</small></div><button className="icon-button" aria-label="刷新数据" onClick={refresh} disabled={refreshing}>{refreshing ? "···" : "↻"}</button><button className="settings-button" onClick={refresh} disabled={refreshing}>立即同步</button></div>
+          <div className="top-actions"><div className={`connection ${sseConnected ? "connected" : "demo"}`}><span />{sseConnected ? "实时在线" : connected ? "回退轮询" : "服务不可用"}<small>{lastUpdated}</small></div><button className="icon-button" aria-label="刷新数据" onClick={refresh} disabled={refreshing}>{refreshing ? "···" : "↻"}</button><button className="settings-button" onClick={refresh} disabled={refreshing}>立即同步</button></div>
         </header>
 
         <section className="stats-grid" aria-label="运行指标">
@@ -378,14 +516,14 @@ export default function Home() {
             </article>
 
             <article className="panel queue-panel section-target" id="section-queue" tabIndex={-1}>
-              <div className="panel-heading"><div>待播队列 <em>{queue.length}</em></div><button className="text-button" onClick={refresh}>同步队列</button></div>
+              <div className="panel-heading"><div>待播队列 <em>{queue.length}</em></div><div><button className="text-button" onClick={refresh}>同步队列</button><button className="text-button" onClick={clearQueue} disabled={!queue.length || queueBusy}>清空队列</button></div></div>
               <form className="song-picker" onSubmit={searchSongs}>
                 <label htmlFor="song-search">添加歌曲（每个浏览器会话独立保留搜索结果）</label>
                 <div className="song-search-row"><input id="song-search" value={songQuery} onChange={(event) => setSongQuery(event.target.value)} placeholder="输入歌曲名或歌手" maxLength={100} autoComplete="off" /><button type="submit" disabled={Boolean(songAction)}>{songAction === "search" ? "搜索中…" : "搜索前 10 首"}</button><button type="button" className="direct-song-button" onClick={requestSong} disabled={Boolean(songAction)}>{songAction === "direct" ? "提交中…" : "直接点歌"}</button></div>
                 {songResults.length > 0 && <div className="song-results" aria-label="歌曲搜索结果">{songResults.map((song, index) => { const resultIndex = Number(song.index) || index + 1; return <div className="song-result" key={song.id || `${song.name}-${index}`}><div className="result-cover">{song.cover ? <img src={String(song.cover).replace(/^http:/, "https:")} alt="" /> : "♫"}</div><div><strong>{resultIndex}. {song.name}</strong><span>{song.artists}{song.durationText ? ` · ${song.durationText}` : ""}</span></div><button type="button" onClick={() => selectSong(song, index)} disabled={Boolean(songAction)}>{songAction === `select-${resultIndex}` ? "添加中…" : "加入播放"}</button></div>; })}</div>}
               </form>
-              <div className="queue-header"><span>#</span><span>歌曲</span><span>来源</span><span>时长</span><span>操作</span></div>
-              <div className="queue-list">{!connected ? <div className="empty-state">播放队列数据不可用。</div> : queue.length === 0 ? <div className="empty-state">待播队列为空。</div> : queue.map((song, index) => <div className="queue-row" key={song.id || `${song.name}-${index}`}><span className="queue-index">{String(index + 1).padStart(2, "0")}</span><div className="mini-cover">{song.cover ? <img src={String(song.cover).replace(/^http:/, "https:")} alt="" /> : "♫"}</div><div className="queue-song"><strong>{song.name}</strong><span>{song.artists}</span></div><span className="source-tag">{song.platform === "netease" ? "网易云" : "QQ 音乐"}</span><span className="duration">{song.durationText || formatTime(durationSeconds(song.duration))}</span><button className="queue-remove" type="button" onClick={() => removeQueueItem(index + 1)} disabled={queueRemoving !== null}>{queueRemoving === index + 1 ? "删除中" : "删除"}</button></div>)}</div>
+              <div className="queue-header"><span>排序</span><span>#</span><span className="queue-song-header">歌曲</span><span>来源</span><span>时长</span><span>操作</span></div>
+              <div className="queue-list"><QueueSortableList songs={queue} connected={connected} busy={queueBusy || queueRemoving !== null} removing={queueRemoving} onDragStart={beginQueueDrag} onDragCancel={cancelQueueDrag} onMove={finishQueueDrag} onRemove={removeQueueItem} /></div>
             </article>
           </div>
 
@@ -403,6 +541,18 @@ export default function Home() {
             <article className="panel section-target" id="section-jm" tabIndex={-1}>
               <div className="panel-heading"><div>JM 任务 <em>{jmJobs.length}</em></div><button className="text-button" onClick={refresh}>刷新</button></div>
               <div className="job-list">{!jmEnabled ? <div className="empty-state">JM 功能未启用。</div> : jmJobs.length === 0 ? <div className="empty-state">暂无 JM 任务记录。</div> : jmJobs.map((job) => <div className={`job-row ${job.status}`} key={job.id}><div><strong>JM{job.album_id}</strong><span>{phaseNames[job.phase] || job.phase}{job.page_count ? ` · ${job.page_count} 页` : ""}{job.archive_bytes ? ` · ${formatBytes(job.archive_bytes)}` : ""}</span></div><em>{job.batch_total && job.batch_total > 1 ? `${job.batch_index}/${job.batch_total} · ` : ""}{job.status}</em>{job.error ? <small>{job.error}</small> : <small>{formatMoment(job.updated_at)}</small>}</div>)}</div>
+            </article>
+
+            <article className="panel activity-panel">
+              <div className="panel-heading"><div>性能与故障诊断</div><button className="text-button" onClick={refresh}>刷新</button></div>
+              <div className="activity-list">
+                <div className="activity"><span className={`activity-icon ${credentialDiagnostic.state === "expired" || credentialDiagnostic.state === "refresh_failed" ? "event-error" : ""}`}>Q</span><div><strong>QQ 音乐凭证：{credentialDiagnostic.state || "missing"}</strong><small>{credentialDiagnostic.has_cookie ? `账号 ${credentialDiagnostic.uin || "已脱敏"}` : "未发现运行时 Cookie"}{credentialDiagnostic.expires_at ? ` · 到期 ${formatMoment(new Date(credentialDiagnostic.expires_at * 1000).toISOString())}` : ""}</small></div></div>
+                <div className="activity"><span className="activity-icon">C</span><div><strong>搜索缓存 {String(searchCache.enabled ?? false) === "true" ? "已启用" : "未启用"}</strong><small>命中 {Number(searchCache.hit || 0)} · 未命中 {Number(searchCache.miss || 0)} · 合并 {Number(searchCache.coalesced || 0)} · 占用 {Number(searchCache.size || 0)}/{Number(searchCache.capacity || 0)}</small></div></div>
+                {Object.entries(externalMetrics).slice(0, 6).map(([key, metric]) => <div className="activity" key={key}><span className="activity-icon">P</span><div><strong>{key}</strong><small>{Number(metric.count || 0) < 3 ? "数据不足 · " : `成功率 ${(Number(metric.success_rate || 0) * 100).toFixed(0)}% · `}p50 {Number(metric.p50_ms || 0).toFixed(0)} ms · p95 {Number(metric.p95_ms || 0).toFixed(0)} ms · 样本 {Number(metric.count || 0)}</small></div></div>)}
+                {playbackHistory.slice(0, 3).map((item, index) => <div className="activity" key={`${item.song_id || item.name}-${item.started_at || index}`}><span className={`activity-icon ${item.result === "failed" ? "event-error" : ""}`}>♫</span><div><strong>{item.name || "未知歌曲"} · {item.result || "unknown"}</strong><small>{item.artists || "未知歌手"} · {item.platform || "unknown"} · {item.error_kind || item.source || "播放"} · {formatMoment(item.ended_at || item.started_at)}</small></div></div>)}
+                {commandHistory.slice(0, 4).map((item, index) => <div className="activity" key={item.command_id || `${item.created_at}-${index}`}><span className={`activity-icon ${item.ok ? "" : "event-error"}`}>T</span><div><strong>{item.kind || "unknown"} · {Number(item.duration_ms || 0).toFixed(0)} ms</strong><small>{item.source || "unknown"} · {item.ok ? "成功" : item.error_kind || "失败"} · {formatMoment(item.created_at)}</small></div></div>)}
+                {failureHistory.slice(0, 3).map((item, index) => <div className="activity" key={item.command_id || `${item.created_at}-${index}`}><span className="activity-icon event-error">!</span><div><strong>{item.component || "unknown"} · {item.error_kind || "failure"}</strong><small>{item.message || "无详情"} · {formatMoment(item.created_at)}</small></div></div>)}
+              </div>
             </article>
 
             <article className="panel activity-panel">

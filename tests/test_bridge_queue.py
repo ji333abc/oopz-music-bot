@@ -175,6 +175,38 @@ class QueuePanelTests(unittest.TestCase):
             ["one", "three"],
         )
 
+    def test_move_returns_versioned_queue_and_rejects_stale_version(self) -> None:
+        music = _FakeMusic()
+        for name in ("one", "two", "three"):
+            music.queue.add_to_queue({"name": name, "artists": "artist"})
+        version = music.queue.get_version()
+
+        moved = bridge._move_queue_item(music, "area", 1, 3, version)
+        conflict = bridge._move_queue_item(music, "area", 1, 2, version)
+
+        self.assertEqual([item["name"] for item in moved["queue_all"]], ["two", "three", "one"])
+        self.assertEqual(moved["queue_version"], version + 1)
+        self.assertEqual(conflict["code"], "queue_conflict")
+        self.assertEqual(conflict["actual_version"], version + 1)
+        self.assertEqual(conflict["queue"], conflict["queue_all"])
+
+    def test_stale_delete_and_clear_do_not_mutate_newer_queue(self) -> None:
+        music = _FakeMusic()
+        for name in ("one", "two", "three"):
+            music.queue.add_to_queue({"name": name, "artists": "artist"})
+        stale = music.queue.get_version()
+        music.queue.add_to_queue({"name": "four", "artists": "artist"})
+
+        removed = bridge._remove_queue_items(music, "area", [2], stale)
+        cleared = bridge._clear_queue_items(music, "area", stale)
+
+        self.assertEqual(removed["code"], "queue_conflict")
+        self.assertEqual(cleared["code"], "queue_conflict")
+        self.assertEqual(
+            [item["name"] for item in music.queue.get_queue()],
+            ["one", "two", "three", "four"],
+        )
+
     def test_remove_positions_supports_legacy_redis_queue(self) -> None:
         music = _LegacyMusic(
             [
@@ -259,6 +291,26 @@ class QueuePanelTests(unittest.TestCase):
         self.assertTrue(result["playing"])
         self.assertGreaterEqual(result["progress"], 11)
         self.assertEqual(result["duration"], 180)
+
+    def test_diagnostic_write_failure_does_not_change_command_result(self) -> None:
+        music = _FakeMusic()
+        previous_dependency = bridge._music_dependency
+        bridge._music_dependency = music
+        try:
+            with patch.object(
+                bridge,
+                "_command_config",
+                return_value=("area", "text", "voice", "bot"),
+            ), patch.object(
+                bridge.operations,
+                "record_command_timing",
+                side_effect=OSError("read-only diagnostics"),
+            ):
+                result = bridge._execute_command("面板", "group:user")
+        finally:
+            bridge._music_dependency = previous_dependency
+
+        self.assertTrue(result["ok"])
 
 
 class SearchResultTests(unittest.TestCase):

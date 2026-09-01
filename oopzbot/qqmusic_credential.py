@@ -196,6 +196,21 @@ class _CookieCache:
 
 
 _cookie_cache = _CookieCache()
+_last_refresh_status: dict[str, Any] = {}
+
+
+def _remember_refresh(outcome: RefreshOutcome) -> None:
+    with _LOCK:
+        _last_refresh_status.clear()
+        _last_refresh_status.update(
+            {
+                "ok": bool(outcome.ok),
+                "kind": str(outcome.kind),
+                "message": str(outcome.message)[:240],
+                "checked_at": time.time(),
+                "next_check_at": time.time() + max(0.0, outcome.next_check_seconds),
+            }
+        )
 
 
 def publish_cookie(
@@ -277,6 +292,7 @@ def credential_status() -> dict[str, Any]:
         updated_at = _cookie_cache.updated_at
         source = _cookie_cache.source
         uin = _cookie_cache.uin
+        last_refresh = dict(_last_refresh_status)
     status = {
         "cookie_state_file": str(path),
         "has_cookie": cookie_present,
@@ -284,6 +300,7 @@ def credential_status() -> dict[str, Any]:
         "cookie_source": source,
         "uin": mask_uin(uin) or summary.get("uin", ""),
         "auto_refresh_env": _auto_refresh_enabled(),
+        "last_refresh": last_refresh,
     }
     status.update(summary)
     return status
@@ -405,6 +422,7 @@ class CookieRefreshService:
             return min(due - now, 1800)
 
         outcome = await self._refresh_once(credential, saved_at)
+        _remember_refresh(outcome)
         if outcome.credential is not None:
             interval = compute_refresh_interval(
                 outcome.credential,
@@ -509,7 +527,9 @@ async def refresh_and_publish(
         refresher=refresher,
         on_publish=on_publish,
     )
-    return await service._refresh_once(credential, saved_at)
+    outcome = await service._refresh_once(credential, saved_at)
+    _remember_refresh(outcome)
+    return outcome
 
 
 def propagate_cookie(settings: Any, *, managed_service: Any = None) -> dict[str, Any]:

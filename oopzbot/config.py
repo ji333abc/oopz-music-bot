@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import secrets
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def _text(name: str, default: str = "") -> str:
@@ -28,6 +31,25 @@ def _boolean(name: str, default: bool = False) -> bool:
     if raw in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"{name} 必须是 true 或 false，当前值为 {raw!r}")
+
+
+def _bounded_integer(name: str, default: int, minimum: int, maximum: int) -> int:
+    raw = _text(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("%s 不是整数，回退到 %d", name, default)
+        return default
+    if not minimum <= value <= maximum:
+        logger.warning(
+            "%s 超出允许范围 %d-%d，回退到 %d",
+            name,
+            minimum,
+            maximum,
+            default,
+        )
+        return default
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +80,16 @@ class Settings:
     qq_music_refresh_min_hours: int = 6
     qq_music_refresh_max_hours: int = 24
     qq_music_cookie_api_url: str = ""
+    search_cache_enabled: bool = True
+    search_cache_ttl_seconds: int = 60
+    search_cache_max_entries: int = 256
+    search_negative_cache_ttl_seconds: int = 10
+    metrics_window_size: int = 200
+    playback_history_limit: int = 50
+    failure_history_limit: int = 100
+    command_history_limit: int = 200
+    panel_sse_enabled: bool = True
+    panel_sse_heartbeat_seconds: int = 20
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -91,6 +123,32 @@ class Settings:
             qq_music_refresh_min_hours=_integer("QQ_MUSIC_REFRESH_MIN_HOURS", 6),
             qq_music_refresh_max_hours=_integer("QQ_MUSIC_REFRESH_MAX_HOURS", 24),
             qq_music_cookie_api_url=_text("QQ_MUSIC_COOKIE_API_URL"),
+            search_cache_enabled=_boolean("OOPZ_SEARCH_CACHE_ENABLED", True),
+            search_cache_ttl_seconds=_bounded_integer(
+                "OOPZ_SEARCH_CACHE_TTL_SECONDS", 60, 5, 600
+            ),
+            search_cache_max_entries=_bounded_integer(
+                "OOPZ_SEARCH_CACHE_MAX_ENTRIES", 256, 16, 2048
+            ),
+            search_negative_cache_ttl_seconds=_bounded_integer(
+                "OOPZ_SEARCH_NEGATIVE_CACHE_TTL_SECONDS", 10, 1, 60
+            ),
+            metrics_window_size=_bounded_integer(
+                "OOPZ_METRICS_WINDOW_SIZE", 200, 10, 2000
+            ),
+            playback_history_limit=_bounded_integer(
+                "OOPZ_PLAYBACK_HISTORY_LIMIT", 50, 10, 500
+            ),
+            failure_history_limit=_bounded_integer(
+                "OOPZ_FAILURE_HISTORY_LIMIT", 100, 10, 1000
+            ),
+            command_history_limit=_bounded_integer(
+                "OOPZ_COMMAND_HISTORY_LIMIT", 200, 10, 2000
+            ),
+            panel_sse_enabled=_boolean("OOPZ_PANEL_SSE_ENABLED", True),
+            panel_sse_heartbeat_seconds=_bounded_integer(
+                "OOPZ_PANEL_SSE_HEARTBEAT_SECONDS", 20, 15, 25
+            ),
             log_level=_text("LOG_LEVEL", "INFO").upper(),
             bridge_private_network=_boolean(
                 "OOPZBOT_BRIDGE_PRIVATE_NETWORK",

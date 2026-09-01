@@ -10,6 +10,7 @@ import logging
 import requests
 
 from .config import Settings, get_settings
+from .metrics import metrics
 from .qqmusic_credential import current_cookie
 
 logger = logging.getLogger("QQMusic")
@@ -51,8 +52,16 @@ class QQMusic:
         return quality if quality in _SUPPORTED_QUALITIES else default
 
     def _get(self, path: str, params: dict | None = None) -> dict | None:
+        timer = metrics.timer()
         if not self.base_url:
             self.last_error = {"type": "config", "message": "QQ音乐接口未配置"}
+            metrics.record_external(
+                service="qqmusic",
+                operation=path,
+                result_kind="config",
+                ok=False,
+                duration_ms=timer.elapsed_ms(),
+            )
             return None
         self.last_error = None
         try:
@@ -67,21 +76,46 @@ class QQMusic:
                 timeout=HTTP_TIMEOUT_DEFAULT,
             )
             response.raise_for_status()
-            return response.json()
+            try:
+                payload = response.json()
+            except ValueError:
+                self.last_error = {
+                    "type": "parse_error",
+                    "message": "QQ音乐接口返回格式异常，请稍后重试",
+                }
+                metrics.record_external(
+                    service="qqmusic", operation=path, result_kind="parse_error",
+                    ok=False, duration_ms=timer.elapsed_ms(),
+                )
+                return None
+            metrics.record_external(
+                service="qqmusic", operation=path, result_kind="ok",
+                ok=True, duration_ms=timer.elapsed_ms(),
+            )
+            return payload
         except requests.Timeout:
             self.last_error = {
                 "type": "timeout",
                 "message": "QQ音乐接口请求超时，请稍后重试",
             }
             logger.error("QQ 音乐 API 请求超时: path=%s", path)
+            metrics.record_external(
+                service="qqmusic", operation=path, result_kind="timeout",
+                ok=False, duration_ms=timer.elapsed_ms(),
+            )
             return None
         except requests.HTTPError as exc:
             status = getattr(getattr(exc, "response", None), "status_code", "unknown")
+            result_kind = "cookie_invalid" if status in {401, 403} else "upstream_http"
             self.last_error = {
-                "type": "http",
+                "type": result_kind,
                 "message": f"QQ音乐接口异常（HTTP {status}），请稍后重试",
             }
             logger.error("QQ 音乐 API HTTP 异常: path=%s status=%s", path, status)
+            metrics.record_external(
+                service="qqmusic", operation=path, result_kind=result_kind,
+                ok=False, duration_ms=timer.elapsed_ms(),
+            )
             return None
         except Exception as exc:
             self.last_error = {
@@ -89,6 +123,10 @@ class QQMusic:
                 "message": "QQ音乐接口连接失败，请稍后重试",
             }
             logger.error("QQ 音乐 API 请求失败: %s", exc)
+            metrics.record_external(
+                service="qqmusic", operation=path, result_kind="network",
+                ok=False, duration_ms=timer.elapsed_ms(),
+            )
             return None
 
     @staticmethod
@@ -177,6 +215,7 @@ class QQMusic:
         return str(url) if url else ""
 
     def get_song_url(self, song_id, quality: str | None = None, **_ignored) -> str | None:
+        operation_timer = metrics.timer()
         song_id = str(song_id)
         selected_quality = self._normalize_quality(
             quality,
@@ -197,12 +236,32 @@ class QQMusic:
             )
             url = self._extract_play_url(data or {}, song_id)
             if url:
+                metrics.record_external(
+                    service="qqmusic", operation="playability", result_kind="playable",
+                    ok=True, duration_ms=operation_timer.elapsed_ms(),
+                )
                 return url
 
         # Both supported QQ Music API services expose /getMusicPlay.  Do not
         # probe the obsolete /song/url route: it returns 404 on current APIs
         # and obscures the real reason when QQ marks a track unplayable.
+        result_kind = "dependency_error" if getattr(self, "last_error", None) else "unplayable"
+        metrics.record_external(
+            service="qqmusic", operation="playability", result_kind=result_kind,
+            ok=False, duration_ms=operation_timer.elapsed_ms(),
+        )
         return None
+
+    def diagnostics(self) -> dict:
+        return {
+            "service": "qqmusic",
+            "last_error": dict(self.last_error or {}),
+            "endpoints": {
+                key: value
+                for key, value in metrics.summaries().items()
+                if key.startswith("qqmusic:")
+            },
+        }
 
     def get_fallback_song_url(self, song_id) -> str | None:
         """获取 Python 本地下载使用的低码率备用链接。"""

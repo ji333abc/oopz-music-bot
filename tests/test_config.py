@@ -128,6 +128,73 @@ class SettingsTests(unittest.TestCase):
             errors = Settings.from_env().validate()
         self.assertIn("QQ_MUSIC_REFRESH_MIN_HOURS 不能大于 MAX_HOURS", errors)
 
+    def test_search_cache_settings_parse_and_bound_invalid_values(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "OOPZ_SEARCH_CACHE_ENABLED": "false",
+                "OOPZ_SEARCH_CACHE_TTL_SECONDS": "120",
+                "OOPZ_SEARCH_CACHE_MAX_ENTRIES": "512",
+                "OOPZ_SEARCH_NEGATIVE_CACHE_TTL_SECONDS": "20",
+            },
+            clear=True,
+        ):
+            settings = Settings.from_env()
+        self.assertFalse(settings.search_cache_enabled)
+        self.assertEqual(settings.search_cache_ttl_seconds, 120)
+        self.assertEqual(settings.search_cache_max_entries, 512)
+        self.assertEqual(settings.search_negative_cache_ttl_seconds, 20)
+
+        with patch.dict(
+            os.environ,
+            {
+                "OOPZ_SEARCH_CACHE_TTL_SECONDS": "-1",
+                "OOPZ_SEARCH_CACHE_MAX_ENTRIES": "unbounded",
+            },
+            clear=True,
+        ):
+            settings = Settings.from_env()
+        self.assertEqual(settings.search_cache_ttl_seconds, 60)
+        self.assertEqual(settings.search_cache_max_entries, 256)
+
+    def test_panel_sse_settings_are_bounded(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "OOPZ_PANEL_SSE_ENABLED": "false",
+                "OOPZ_PANEL_SSE_HEARTBEAT_SECONDS": "25",
+            },
+            clear=True,
+        ):
+            settings = Settings.from_env()
+        self.assertFalse(settings.panel_sse_enabled)
+        self.assertEqual(settings.panel_sse_heartbeat_seconds, 25)
+
+        with patch.dict(
+            os.environ,
+            {"OOPZ_PANEL_SSE_HEARTBEAT_SECONDS": "1"},
+            clear=True,
+        ):
+            settings = Settings.from_env()
+        self.assertEqual(settings.panel_sse_heartbeat_seconds, 20)
+
+    def test_metric_and_history_limits_are_bounded(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "OOPZ_METRICS_WINDOW_SIZE": "500",
+                "OOPZ_PLAYBACK_HISTORY_LIMIT": "75",
+                "OOPZ_FAILURE_HISTORY_LIMIT": "125",
+                "OOPZ_COMMAND_HISTORY_LIMIT": "250",
+            },
+            clear=True,
+        ):
+            settings = Settings.from_env()
+        self.assertEqual(settings.metrics_window_size, 500)
+        self.assertEqual(settings.playback_history_limit, 75)
+        self.assertEqual(settings.failure_history_limit, 125)
+        self.assertEqual(settings.command_history_limit, 250)
+
 
 if __name__ == "__main__":
     unittest.main()

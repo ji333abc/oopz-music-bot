@@ -164,5 +164,9 @@ Write-Host "1. Edit configuration: $projectDir\.env"
 Write-Host "2. Check configuration: $venvBot check"
 Write-Host "3. Discover channels: $venvBot discover"
 Write-Host "4. Start the bot: $venvBot start"
+if ($installJm) {
+    $jmService = Join-Path $projectDir ".venv\Scripts\oopzbot-jm-service.exe"
+    Write-Host "5. Start the independent JM worker: $jmService (Redis required)"
+}
 Set-Location $originalLocation
 $global:LASTEXITCODE = 0

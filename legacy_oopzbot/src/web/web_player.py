@@ -8,32 +8,34 @@ import secrets
 import time
 from collections import defaultdict
 from threading import Lock
-from typing import Optional
 
 import redis
 import uvicorn
+import web.web_player_config as cfg
+from core.logger_config import get_logger
+from core.queue_manager import (
+    KEY_CURRENT,
+    KEY_PLAY_MODE,
+    KEY_PLAY_STATE,
+    KEY_QUEUE,
+    QueueManager,
+    _area_key,
+    get_redis_client,
+)
+from core.redis_keys import VOLUME as KEY_VOLUME
+from core.redis_keys import WEB_COMMANDS as KEY_WEB_COMMANDS
+from core.redis_keys import WEB_TOKEN_COOKIE
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-
-from core.logger_config import get_logger
 from music.netease import NeteaseCloud
-from core.queue_manager import (
-    get_redis_client,
-    _area_key,
-    KEY_QUEUE,
-    KEY_CURRENT,
-    KEY_PLAY_STATE,
-    KEY_PLAY_MODE,
-)
+from web.qqbot_bridge_api import router as qqbot_bridge_router
 from web.web_api_auth import (
     READONLY_API_TOKEN_ENV,
     READONLY_API_TOKEN_HEADER,
     api_request_authorized,
 )
-from web.web_link_token import get_token, set_token, get_active_area
-
-import web.web_player_config as cfg
+from web.web_link_token import get_active_area, get_token, set_token
 
 logger = get_logger("WebPlayer")
 
@@ -86,8 +88,6 @@ _search_limiter = _RateLimiter(max_requests=15, window_seconds=60)
 # ---------------------------------------------------------------------------
 
 app = FastAPI(title="Oopz Music Player", docs_url=None, redoc_url=None)
-from web.qqbot_bridge_api import router as qqbot_bridge_router
-
 app.include_router(qqbot_bridge_router)
 _WEB_ASSETS_DIR = os.path.join(cfg.PROJECT_ROOT, "src", "web", "assets")
 _ADMIN_ASSETS_DIR = os.path.join(_WEB_ASSETS_DIR, "admin")
@@ -108,8 +108,8 @@ _mount_static_if_exists("/webintosh-assets", _WEBINTOSH_ASSETS_DIR, "webintosh-a
 # 共享状态（admin 模块通过公共函数访问）
 # ---------------------------------------------------------------------------
 
-_redis: Optional[redis.Redis] = None
-_netease: Optional[NeteaseCloud] = None
+_redis: redis.Redis | None = None
+_netease: NeteaseCloud | None = None
 
 _lyric_cache: dict[str, dict] = {}
 _lyric_lock = Lock()
@@ -118,7 +118,6 @@ _LYRIC_CACHE_MAX = 200
 started_at: float = time.time()
 liked_ids_cache: list = []
 
-from core.redis_keys import WEB_COMMANDS as KEY_WEB_COMMANDS, VOLUME as KEY_VOLUME, WEB_TOKEN_COOKIE
 # 可选播放模式取值（与 src/music.py 中的 PLAY_MODE_* 常量保持一致）。
 # 注意：autoplay 不是可选模式，仅为队列播完自动续播时的来源标识。
 PLAY_MODE_LIST = "list"
@@ -331,12 +330,11 @@ async def _auth_web_api(request: Request, call_next):
 # ---------------------------------------------------------------------------
 
 def execute_control_action(action: str, body: dict, redis_client: redis.Redis, area: str = "") -> dict:
-    queue_key = _area_key(KEY_QUEUE, area)
     if action == "next":
         redis_client.rpush(KEY_WEB_COMMANDS, "next")
         return {"ok": True}
     if action == "clear":
-        redis_client.delete(queue_key)
+        QueueManager(area, redis_client=redis_client).clear_queue()
         return {"ok": True}
     if action == "stop":
         redis_client.rpush(KEY_WEB_COMMANDS, "stop")
@@ -367,48 +365,21 @@ def execute_control_action(action: str, body: dict, redis_client: redis.Redis, a
     return {"ok": False, "error": f"未知操作: {action}"}
 
 
-_QUEUE_REMOVE_LUA = """
-local key = KEYS[1]
-local idx = tonumber(ARGV[1])
-if idx < 0 or idx >= redis.call('llen', key) then
-    return -1
-end
-redis.call('lset', key, idx, '__REMOVED__')
-redis.call('lrem', key, 1, '__REMOVED__')
-return 0
-"""
-
-_QUEUE_TOP_LUA = """
-local key = KEYS[1]
-local idx = tonumber(ARGV[1])
-local len = redis.call('llen', key)
-if idx < 0 or idx >= len then
-    return -1
-end
-local item = redis.call('lindex', key, idx)
-redis.call('lset', key, idx, '__REMOVED__')
-redis.call('lrem', key, 1, '__REMOVED__')
-redis.call('lpush', key, item)
-return 0
-"""
-
-
 def execute_queue_action(action: str, index, redis_client: redis.Redis, area: str = "") -> dict:
     try:
         idx = int(index)
     except (TypeError, ValueError):
         return {"ok": False, "error": "索引无效"}
-    queue_key = _area_key(KEY_QUEUE, area)
-    if action == "remove":
-        ret = redis_client.eval(_QUEUE_REMOVE_LUA, 1, queue_key, idx)
-        if ret == -1:
-            return {"ok": False, "error": "索引无效"}
-        return {"ok": True}
-    if action == "top":
-        ret = redis_client.eval(_QUEUE_TOP_LUA, 1, queue_key, idx)
-        if ret == -1:
-            return {"ok": False, "error": "索引无效"}
-        return {"ok": True}
+    manager = QueueManager(area, redis_client=redis_client)
+    try:
+        if action == "remove":
+            manager.remove_positions([idx + 1])
+            return {"ok": True}
+        if action == "top":
+            manager.move_position(idx + 1, 1)
+            return {"ok": True}
+    except IndexError:
+        return {"ok": False, "error": "索引无效"}
     return {"ok": False, "error": f"未知操作: {action}"}
 
 
@@ -448,12 +419,7 @@ def add_song_to_queue(body: dict, area: str = "") -> dict:
         "user": "web",
     }
     r = get_redis()
-    queue_key = _area_key(KEY_QUEUE, area)
-    pipe = r.pipeline(transaction=False)
-    pipe.rpush(queue_key, json.dumps(song_data, ensure_ascii=False))
-    pipe.llen(queue_key)
-    results = pipe.execute()
-    queue_len = int(results[1] or 0)
+    queue_len = QueueManager(area, redis_client=r).add_to_queue(song_data) + 1
     notify = json.dumps({"name": name, "artists": artists, "position": queue_len}, ensure_ascii=False)
     r.rpush(KEY_WEB_COMMANDS, f"notify:{notify}")
     return {"ok": True, "position": queue_len, "name": name}
@@ -663,7 +629,7 @@ def api_debug(area: str = Query("", description="域 ID")):
 def api_liked(
     page: int = Query(1, ge=1),
     limit: int = Query(30, ge=1, le=50),
-    keyword: Optional[str] = Query(None, max_length=200),
+    keyword: str | None = Query(None, max_length=200),
 ):
     """获取喜欢的音乐列表（分页）。若传 keyword 则在全部喜欢中搜索后分页返回。"""
     global liked_ids_cache
@@ -849,7 +815,7 @@ def index_with_token(token: str, request: Request):
     set_token(token, redis_client=r, ttl_seconds=cfg.token_ttl_seconds())
     area = (request.query_params.get("area") or "").strip()
     html_path = os.path.join(_WEB_ASSETS_DIR, "player.html")
-    with open(html_path, "r", encoding="utf-8") as f:
+    with open(html_path, encoding="utf-8") as f:
         html = f.read()
     html = html.replace(
         "</head>",

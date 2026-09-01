@@ -35,10 +35,12 @@ class RedisFailoverTests(unittest.TestCase):
     def setUp(self) -> None:
         queue_manager._redis_client = None
         queue_manager._last_redis_retry = 0.0
+        queue_manager._claimed_queue_areas.clear()
 
     def tearDown(self) -> None:
         queue_manager._redis_client = None
         queue_manager._last_redis_retry = 0.0
+        queue_manager._claimed_queue_areas.clear()
 
     def test_startup_failure_uses_memory_queue(self) -> None:
         with patch.object(queue_manager, "_try_connect_redis", return_value=None):
@@ -111,6 +113,61 @@ class RedisFailoverTests(unittest.TestCase):
             [item["song_id"] for item in manager.get_queue()],
             ["1", "3"],
         )
+
+    def test_area_versions_are_isolated_and_conflicts_are_atomic(self) -> None:
+        memory = queue_manager._InMemoryRedis()
+        queue_manager._redis_client = memory
+        queue_manager._last_redis_retry = float("inf")
+        first = queue_manager.QueueManager("area-a")
+        second = queue_manager.QueueManager("area-b")
+        first.add_to_queue({"song_id": "a1"})
+        first.add_to_queue({"song_id": "a2"})
+        second.add_to_queue({"song_id": "b1"})
+        version_a = first.get_version()
+        version_b = second.get_version()
+
+        first.move_position(1, 2, version_a)
+        with self.assertRaisesRegex(RuntimeError, "version conflict"):
+            first.remove_positions([1], version_a)
+
+        self.assertEqual([item["song_id"] for item in first.get_queue()], ["a2", "a1"])
+        self.assertEqual(second.get_version(), version_b)
+        self.assertEqual([item["song_id"] for item in second.get_queue()], ["b1"])
+
+    def test_returning_song_to_front_advances_version(self) -> None:
+        memory = queue_manager._InMemoryRedis()
+        queue_manager._redis_client = memory
+        queue_manager._last_redis_retry = float("inf")
+        manager = queue_manager.QueueManager()
+        manager.add_to_queue({"song_id": "second"})
+        version = manager.get_version()
+
+        manager.add_to_front({"song_id": "first"})
+
+        self.assertEqual(manager.get_version(), version + 1)
+        self.assertEqual(
+            [item["song_id"] for item in manager.get_queue()],
+            ["first", "second"],
+        )
+
+    def test_pinned_client_keeps_all_mutations_versioned(self) -> None:
+        memory = queue_manager._InMemoryRedis()
+        manager = queue_manager.QueueManager("web", redis_client=memory)
+
+        with patch.object(
+            queue_manager,
+            "get_redis_client",
+            side_effect=AssertionError("pinned manager must not switch clients"),
+        ):
+            manager.add_to_queue({"song_id": "one"})
+            manager.add_to_queue({"song_id": "two"})
+            version = manager.get_version()
+            manager.move_position(2, 1)
+            manager.remove_positions([2])
+            manager.clear_queue()
+
+        self.assertEqual(manager.get_queue(), [])
+        self.assertEqual(manager.get_version(), version + 3)
 
 
 if __name__ == "__main__":

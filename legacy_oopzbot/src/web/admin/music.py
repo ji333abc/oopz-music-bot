@@ -3,17 +3,15 @@ import os
 import sys
 import time
 
+from core.json_utils import compact_json
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-
 from web.admin.shared import (
     DB_PATH,
-    KEY_QUEUE,
     SetupDiagnostics,
     SongCache,
     Statistics,
     _add_song_to_queue,
-    _area_key,
     _current_song_snapshot,
     _execute_control_action,
     _execute_queue_action,
@@ -30,13 +28,12 @@ from web.admin.shared import (
     _tail_file,
     _top_songs_from_play_history,
     cfg,
-    read_json_body,
     clear_token,
     db_connection,
     ensure_token,
     get_token,
+    read_json_body,
 )
-from core.json_utils import compact_json
 
 router = APIRouter()
 
@@ -148,8 +145,10 @@ def admin_liked_refresh():
 @router.post("/admin/api/queue/clear")
 def admin_queue_clear():
     area = _get_music_area()
-    _get_redis().delete(_area_key(KEY_QUEUE, area))
-    return JSONResponse({"ok": True})
+    result = _execute_control_action(
+        action="clear", body={}, redis_client=_get_redis(), area=area
+    )
+    return JSONResponse(result)
 
 
 @router.get("/admin/api/queue")

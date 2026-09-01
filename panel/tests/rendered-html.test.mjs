@@ -42,6 +42,7 @@ test("protects and renders the real-data control panel shell", async () => {
   assert.match(html, /搜索前 10 首/);
   assert.match(html, /直接点歌/);
   assert.match(html, /真实事件记录/);
+  assert.match(html, /性能与故障诊断/);
   assert.match(html, /组件健康数据不可用/);
   assert.match(html, /没有使用演示数据/);
   assert.doesNotMatch(html, /Administrator/);
@@ -53,9 +54,31 @@ test("protects and renders the real-data control panel shell", async () => {
   assert.match(source, /60 \* 60 \* 1000/);
   assert.match(source, /fetch\("\/api\/state"/);
   assert.match(source, /queue\.map/);
+  assert.match(source, /new EventSource\("\/api\/events"/);
+  assert.match(source, /expected_version/);
+  const sortable = await readFile(new URL("../components/QueueSortableList.tsx", import.meta.url), "utf8");
+  assert.match(sortable, /PointerSensor/);
+  assert.match(sortable, /TouchSensor/);
+  assert.match(sortable, /KeyboardSensor/);
+  assert.match(sortable, /sortableKeyboardCoordinates/);
+  assert.match(sortable, /aria-keyshortcuts="Space ArrowUp ArrowDown"/);
+  assert.match(source, /清空队列/);
   assert.match(source, /channel\.members\.map/);
   assert.match(source, />磁盘</);
   assert.match(source, />内存</);
+});
+
+test("forwards queue versions and exposes a token-free SSE proxy", async () => {
+  const commandRoute = await readFile(new URL("../app/api/command/route.ts", import.meta.url), "utf8");
+  const eventsRoute = await readFile(new URL("../app/api/events/route.ts", import.meta.url), "utf8");
+  const bridge = await readFile(new URL("../lib/bridge.ts", import.meta.url), "utf8");
+  assert.match(commandRoute, /expected_version/);
+  assert.match(commandRoute, /status: response\.status/);
+  assert.match(eventsRoute, /text\/event-stream/);
+  assert.match(eventsRoute, /X-Accel-Buffering/);
+  assert.doesNotMatch(eventsRoute, /QQBOT_BRIDGE_TOKEN/);
+  assert.match(bridge, /Last-Event-ID/);
+  assert.match(bridge, /x-qqbot-bridge-token/);
 });
 
 test("proxies the unified structured snapshot", async () => {

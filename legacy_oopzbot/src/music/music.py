@@ -1,29 +1,32 @@
 from __future__ import annotations
 
-import time
-import uuid
+import copy
 import random
 import threading
-import copy
-from typing import Optional
+import time
+import uuid
 
-from oopz.oopz_sender import OopzSender
-from music.netease import NeteaseCloud
-from core.queue_manager import QueueManager
-from core.redis_keys import VOLUME as KEY_VOLUME, WEB_COMMANDS as KEY_WEB_COMMANDS
-from core.database import ImageCache, SongCache, Statistics
-from oopz.name_resolver import NameResolver
-from music.voice_client import VoiceClient
 from config import OOPZ_CONFIG, WEB_PLAYER_CONFIG
+from core.database import ImageCache, SongCache, Statistics
 from core.logger_config import get_logger
-from web.web_link_token import clear_token, get_token, set_active_area
-from music.music_web_control import WebControlExecutor
+from core.queue_manager import QueueManager
+from core.redis_keys import VOLUME as KEY_VOLUME
+from core.redis_keys import WEB_COMMANDS as KEY_WEB_COMMANDS
 from music.music_platform import PlatformRegistry
 from music.music_playback import (
     PlaybackMixin,
-    reset_web_player_url_cache,  # noqa: F401 — re-export
     _web_player_link,
+    reset_web_player_url_cache,  # noqa: F401 — re-export
 )
+from music.music_web_control import WebControlExecutor
+from music.netease import NeteaseCloud
+from music.voice_client import VoiceClient
+from oopz.name_resolver import NameResolver
+from oopz.oopz_sender import OopzSender
+from web.web_link_token import clear_token, get_token, set_active_area
+
+from oopzbot.application.search_cache import SearchCache
+from oopzbot.config import get_settings
 
 logger = get_logger("Music")
 
@@ -76,7 +79,7 @@ class MusicHandler(PlaybackMixin):
     队列按域隔离，每个域拥有独立的 QueueManager。
     语音连接同一时刻只有一个（Agora 限制），通过 _voice_channel_area 标识当前所在域。"""
 
-    def __init__(self, sender: OopzSender, voice: Optional[VoiceClient] = None):
+    def __init__(self, sender: OopzSender, voice: VoiceClient | None = None):
         self.supports_interactive_selection = True
         self.sender = sender
         self.voice = voice
@@ -88,8 +91,8 @@ class MusicHandler(PlaybackMixin):
         self._liked_ids_cache: list = []
         self._play_start_time: float = 0
         self._play_duration: float = 0
-        self._voice_channel_id: Optional[str] = None
-        self._voice_channel_area: Optional[str] = None
+        self._voice_channel_id: str | None = None
+        self._voice_channel_area: str | None = None
         self._voice_enter_time: float = 0
         self._playlist_idle_since: float = 0
         self._web_link_released_due_to_idle: bool = False
@@ -97,6 +100,13 @@ class MusicHandler(PlaybackMixin):
         self.platforms = PlatformRegistry()
         self.platforms.register(self.netease)
         self._init_extra_platforms()
+        settings = get_settings()
+        self.search_cache = SearchCache(
+            enabled=settings.search_cache_enabled,
+            ttl_seconds=settings.search_cache_ttl_seconds,
+            negative_ttl_seconds=settings.search_negative_cache_ttl_seconds,
+            max_entries=settings.search_cache_max_entries,
+        )
 
         # 登录账号"我喜欢的音乐"本地搜索索引：/bf 时优先在这里命中，
         # 命中可省一次 cloudsearch 且更贴近用户口味。索引在后台懒加载，
@@ -173,6 +183,7 @@ class MusicHandler(PlaybackMixin):
         self.platforms = PlatformRegistry()
         self.platforms.register(self.netease)
         self._init_extra_platforms()
+        self.search_cache.clear()
         return {
             "available": True,
             "refreshed": True,
@@ -475,9 +486,24 @@ class MusicHandler(PlaybackMixin):
         p = self.platforms.get(resolved_platform)
         if not p:
             return []
-        return p.search_many(keyword, limit=max(1, min(limit, 10)))
+        normalized_limit = max(1, min(limit, 10))
+        load_failed = False
 
-    def search_best_candidate(self, keyword: str, platform: str = _PLATFORM_NETEASE) -> Optional[dict]:
+        def load() -> list[dict]:
+            nonlocal load_failed
+            value = p.search_many(keyword, limit=normalized_limit)
+            load_failed = bool(getattr(p, "last_error", None))
+            return value
+
+        return self.search_cache.search(
+            resolved_platform,
+            keyword,
+            limit=normalized_limit,
+            loader=load,
+            cacheable=lambda _value: not load_failed,
+        )
+
+    def search_best_candidate(self, keyword: str, platform: str = _PLATFORM_NETEASE) -> dict | None:
         """快速搜索首条候选，用于 /bf 直播放歌的快速命中。
 
         netease 平台优先在登录账号"我喜欢的音乐"里搜，命中就用喜欢列表的那一首；
@@ -856,7 +882,7 @@ class MusicHandler(PlaybackMixin):
         if hasattr(self.queue, "set_play_mode"):
             self.queue.set_play_mode(mode)
 
-    def _build_autoplay_song(self, current_song: dict | None) -> Optional[dict]:
+    def _build_autoplay_song(self, current_song: dict | None) -> dict | None:
         uid = self.netease.get_user_id()
         if not uid:
             return None
@@ -912,7 +938,7 @@ class MusicHandler(PlaybackMixin):
             self._liked_search_loading = False
 
     @staticmethod
-    def _match_liked_in(songs: list[dict], keyword: str) -> Optional[dict]:
+    def _match_liked_in(songs: list[dict], keyword: str) -> dict | None:
         """在给定歌曲列表里按 keyword 找最匹配的一首。
 
         匹配策略（按优先级降序）：
@@ -953,11 +979,11 @@ class MusicHandler(PlaybackMixin):
 
         for bucket in (exact, prefix_name, contains_full, token_match):
             if bucket:
-                bucket.sort(key=lambda s: len((s.get("name") or "")))
+                bucket.sort(key=lambda s: len(s.get("name") or ""))
                 return bucket[0]
         return None
 
-    def _lookup_liked_song(self, keyword: str) -> Optional[dict]:
+    def _lookup_liked_song(self, keyword: str) -> dict | None:
         """在喜欢列表里找最匹配的一首；返回 None 表示未命中（外层走全网搜索）。
 
         - 先在本地 cache 里搜
@@ -990,7 +1016,7 @@ class MusicHandler(PlaybackMixin):
 
     _NEW_LIKED_PROBE_LIMIT = 200
 
-    def _lookup_in_new_liked(self, keyword: str, existing_ids: set) -> Optional[dict]:
+    def _lookup_in_new_liked(self, keyword: str, existing_ids: set) -> dict | None:
         """从 likelist 里找 cache 还没收录的新增 ID，按需拉详情匹配。"""
         try:
             uid = self.netease.get_user_id()
@@ -1035,7 +1061,7 @@ class MusicHandler(PlaybackMixin):
             logger.debug(f"增量喜欢列表查询失败: {e}")
             return None
 
-    def _dequeue_next_song(self, natural_end: bool, current_song: dict | None) -> tuple[Optional[dict], str]:
+    def _dequeue_next_song(self, natural_end: bool, current_song: dict | None) -> tuple[dict | None, str]:
         """根据播放模式决定下一首歌。"""
         mode = self.get_play_mode()
         if natural_end and mode == PLAY_MODE_SINGLE and current_song:
@@ -1098,7 +1124,7 @@ class MusicHandler(PlaybackMixin):
     # 内部方法
     # ------------------------------------------------------------------
 
-    def _fetch_netease_song_data(self, song_id: int, channel: str, area: str, user: str) -> Optional[dict]:
+    def _fetch_netease_song_data(self, song_id: int, channel: str, area: str, user: str) -> dict | None:
         """通过歌曲 ID 获取详情并构建统一的 song_data 字典，失败返回 None。"""
         result = self.netease.summarize_by_id(song_id)
         if result["code"] != "success":
@@ -1170,7 +1196,7 @@ class MusicHandler(PlaybackMixin):
     _COVER_PREFETCH_TIMEOUT = 5.0
     _COVER_PREFETCH_TTL = 60.0
 
-    def _cover_prefetch_key(self, song_data: dict) -> Optional[str]:
+    def _cover_prefetch_key(self, song_data: dict) -> str | None:
         cover = song_data.get("cover")
         song_id = song_data.get("song_id")
         if not cover or not song_id:
@@ -1231,7 +1257,7 @@ class MusicHandler(PlaybackMixin):
         with self._cover_prefetch_lock:
             self._cover_prefetch.pop(key, None)
 
-    def _resolve_song_attachments(self, song_data: dict) -> tuple[list, Optional[int], bool]:
+    def _resolve_song_attachments(self, song_data: dict) -> tuple[list, int | None, bool]:
         """在真正提交播放前再处理封面，避免失败请求也触发上传和写库。"""
         attachments = list(song_data.get("attachments", []))
         image_cache_id = None

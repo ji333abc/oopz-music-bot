@@ -19,13 +19,14 @@ class DockerConfigurationTests(unittest.TestCase):
         compose = (root / "compose.yaml").read_text(encoding="utf-8")
         launcher = (root / "oopzbot" / "qqmusic_launcher.cjs").read_text(encoding="utf-8")
 
-        self.assertIn(".[jm,legacy,qqmusic-login]", dockerfile)
+        self.assertIn('FROM source AS core', dockerfile)
+        self.assertIn('.[legacy,qqmusic-login]', dockerfile)
         self.assertIn('QQ_MUSIC_COOKIE_API_PORT: "3201"', compose)
         self.assertIn("QQ_MUSIC_COOKIE_API_URL: http://qqmusic:3201", compose)
         self.assertIn("x-qqbot-bridge-token", launcher)
         self.assertIn('"/internal/cookie"', launcher)
 
-    def test_bot_image_and_compose_use_container_jm_paths(self) -> None:
+    def test_jm_profile_uses_separate_image_and_container_paths(self) -> None:
         root = Path(__file__).resolve().parents[1]
         dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
         compose = (root / "compose.yaml").read_text(encoding="utf-8")
@@ -35,11 +36,33 @@ class DockerConfigurationTests(unittest.TestCase):
         expected = {
             "QQBOT_JM_UPLOADER": "/app/tools/qqbot-uploader/uploader.mjs",
             "QQBOT_JM_TEMP_ROOT": "/app/data/jm-tasks",
-            "QQBOT_JM_TIMING_PATH": "/app/data/jm_timing.json",
         }
         for name, value in expected.items():
             self.assertIn(f"{name}={value}", dockerfile.replace(" ", ""))
             self.assertIn(f"{name}: {value}", compose)
+        core = dockerfile.split("FROM source AS core", 1)[1].split("FROM source AS jm-worker", 1)[0]
+        worker = dockerfile.split("FROM source AS jm-worker", 1)[1].split("FROM core AS final", 1)[0]
+        self.assertNotIn(".[jm", core)
+        self.assertNotIn("qqbot-uploader", core)
+        self.assertIn('".[jm]"', worker)
+        self.assertNotIn(".[jm,legacy]", worker)
+        self.assertIn('profiles: ["jm"]', compose)
+        self.assertIn("target: jm-worker", compose)
+        self.assertIn("target: core", compose)
+        self.assertIn("OOPZ_BOT_IMAGE", compose)
+        self.assertIn("OOPZ_JM_IMAGE", compose)
+
+    def test_bot_has_no_local_jm_execution_backdoor(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        qqbot = (root / "oopzbot" / "qqbot.py").read_text(encoding="utf-8")
+        compose = (root / "compose.yaml").read_text(encoding="utf-8")
+
+        self.assertNotIn("JM_EXECUTION_MODE", qqbot)
+        self.assertNotIn("_run_jm_job", qqbot)
+        self.assertNotIn("from .jm.downloader", qqbot)
+        self.assertNotIn("from .jm.uploader", qqbot)
+        self.assertNotIn("QQBOT_JM_EXECUTION_MODE", compose)
+        self.assertIn("queue.submit_many", qqbot)
 
     def test_legacy_oopz_core_uses_persistent_redis_and_data_volume(self) -> None:
         root = Path(__file__).resolve().parents[1]

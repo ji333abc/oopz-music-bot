@@ -307,6 +307,10 @@ class JMEntryContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_single_jm_entry_creates_job_and_schedules_background_run(self) -> None:
         message = self._message("JM 123")
         scheduled: list[_ScheduledTask] = []
+        queue = types.SimpleNamespace(
+            available=Mock(return_value=True),
+            submit_many=Mock(),
+        )
 
         def schedule(coroutine):
             coroutine.close()
@@ -317,11 +321,11 @@ class JMEntryContractTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(self.service, "JM_ENABLED", True),
             patch.object(self.service, "JM_ALLOWED_USERS", set()),
-            patch.object(self.service, "_inspect_jm_album", return_value=12),
+            patch.object(self.service, "RedisJMQueue", return_value=queue),
             patch.object(
                 self.service.operations,
                 "begin_jm_job",
-                return_value="job-1",
+                return_value="a" * 32,
             ) as begin,
             patch.object(self.service.operations, "update_jm_job"),
             patch.object(self.client, "_reply", new=AsyncMock()) as reply,
@@ -333,12 +337,21 @@ class JMEntryContractTests(unittest.IsolatedAsyncioTestCase):
         begin.assert_called_once_with(
             "123",
             requester="QQ 群用户",
+            batch_index=1,
+            batch_total=1,
         )
-        self.assertIn("已开始下载 JM123", reply.await_args.args[1])
+        queue.submit_many.assert_called_once()
+        submitted = queue.submit_many.call_args.args[0]
+        self.assertEqual([job.album_id for job in submitted], ["123"])
+        self.assertIn("由独立 worker 顺序处理", reply.await_args.args[1])
 
     async def test_batch_jm_entry_creates_ordered_jobs_and_one_background_run(self) -> None:
         message = self._message("JM 123 456")
         scheduled: list[_ScheduledTask] = []
+        queue = types.SimpleNamespace(
+            available=Mock(return_value=True),
+            submit_many=Mock(),
+        )
 
         def schedule(coroutine):
             coroutine.close()
@@ -349,11 +362,11 @@ class JMEntryContractTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(self.service, "JM_ENABLED", True),
             patch.object(self.service, "JM_ALLOWED_USERS", set()),
-            patch.object(self.service, "_inspect_jm_album", side_effect=[12, 24]),
+            patch.object(self.service, "RedisJMQueue", return_value=queue),
             patch.object(
                 self.service.operations,
                 "begin_jm_job",
-                side_effect=["job-1", "job-2"],
+                side_effect=["a" * 32, "b" * 32],
             ) as begin,
             patch.object(self.service.operations, "update_jm_job"),
             patch.object(self.client, "_reply", new=AsyncMock()) as reply,
@@ -363,7 +376,26 @@ class JMEntryContractTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(scheduled), 1)
         self.assertEqual(begin.call_count, 2)
-        self.assertIn("已开始 JM 批量任务，共 2 个", reply.await_args.args[1])
+        queue.submit_many.assert_called_once()
+        submitted = queue.submit_many.call_args.args[0]
+        self.assertEqual([job.album_id for job in submitted], ["123", "456"])
+        self.assertIn("已提交 JM 任务，共 2 个", reply.await_args.args[1])
+
+    async def test_enabled_jm_without_worker_stays_available_for_music(self) -> None:
+        message = self._message("JM 123")
+        queue = types.SimpleNamespace(available=Mock(return_value=False))
+
+        with (
+            patch.object(self.service, "JM_ENABLED", True),
+            patch.object(self.service, "JM_ALLOWED_USERS", set()),
+            patch.object(self.service, "RedisJMQueue", return_value=queue),
+            patch.object(self.client, "_reply", new=AsyncMock()) as reply,
+        ):
+            await self.client._start_jm_job(message, "123", "user-1")
+
+        self.assertIn("JM 服务未启用或当前不可用", reply.await_args.args[1])
+        self.assertTrue(self.service._jm_job_lock.acquire(blocking=False))
+        self.service._jm_job_lock.release()
 
 
 if __name__ == "__main__":

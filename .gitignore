@@ -48,6 +48,7 @@ jm-tasks/
 
 # Deployment artifacts
 deploy-packages/
+oopz-releases/
 oopz-selfhost-update-*.tar.gz
 *.zip
 

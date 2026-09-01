@@ -58,6 +58,8 @@ docker compose up -d --build
 docker compose logs -f bot
 ```
 
+默认镜像不含 JM 依赖。需要 JM 文件任务时设置 `.env` 中的开关和白名单，再运行 `docker compose --profile jm up -d --build`。面板使用 SSE 实时更新，并支持待播队列鼠标、触摸和键盘拖拽排序。
+
 Compose 会启动 `bot`、`redis`、固定版本的 `qqmusic` 和 `panel`。音乐接口和机器人桥接只在容器内部网络开放；新面板默认监听宿主机 `127.0.0.1:3000`，旧版 OOPZ Web 播放页默认监听 `127.0.0.1:18081`。新面板自带 HTTP Basic Auth（启动前必须设置 `OOPZ_PANEL_PASSWORD`），适合由 Nginx/Caddy 加 HTTPS 后对外提供。
 
 Bot 容器的入口会在首次启动时修正 `./data` 挂载目录的所有权，然后立即降权为
@@ -97,7 +99,7 @@ sh install.sh --with-jm
 
 | Linux / macOS | Windows PowerShell | 作用 |
 | --- | --- | --- |
-| `--with-jm` | `-WithJm` | 安装 JM 文件任务和 Node.js 上传器 |
+| `--with-jm` | `-WithJm` | 安装独立 JM worker 和 Node.js 上传器依赖 |
 | `--skip-browser` | `-SkipBrowser` | 跳过 Chromium 下载 |
 | `--external-music-api` | `-ExternalMusicApi` | 不安装默认 API，改用已有兼容服务 |
 | `--non-interactive` | `-NonInteractive` | 使用默认选项，适合自动化部署 |
@@ -110,6 +112,8 @@ sh install.sh --with-jm
 .venv/bin/oopzbot check      # 离线检查配置
 .venv/bin/oopzbot start      # 启动
 ```
+
+非 Compose 环境启用 JM 时，还需连接 Redis，并把 `.venv/bin/oopzbot-jm-service` 作为独立服务启动；下载、压缩和上传不会在 Bot 进程内执行。
 
 Windows PowerShell 执行：
 

@@ -7,12 +7,13 @@
 - QQMusic API：`/home/oopzbot/qqmusic-api/server.mjs`，使用独立 Node.js 进程；
 - JM 临时目录：`/home/oopzbot/jm-tasks`。
 
-迁移后的 Docker Compose 会统一运行四个服务：
+迁移后的 Docker Compose 默认运行四个服务，并可选运行一个 JM worker：
 
-- `bot`：迁移前的完整 OOPZ 核心、QQ Bot、JM 下载与 QQ 文件上传；
+- `bot`：OOPZ 核心、QQ Bot、任务鉴权/提交与最终通知，不执行 JM 下载或上传；
 - `qqmusic`：项目固定版本的 QQMusic API；
 - `panel`：带登录保护的新 Web 管理面板；
 - `redis`：按 OOPZ 域持久化播放队列和播放状态。
+- `jm-worker`（`jm` Profile）：独立执行 JM 下载、压缩、上传和清理。
 
 建议把新版本安装到 `/opt/oopz-music-bot`，不要覆盖旧目录。这样出现问题时可以直接停容器并恢复旧服务。
 
@@ -22,7 +23,7 @@
 2. 旧进程当前播放和待播队列不能无损导入新 Redis。请选择队列为空时切换，或者接受首次切换后队列清空；Docker 启动后的新队列会持久化。
 3. 正在运行的 JM 任务不能断点迁移。先等待任务完成，再执行正式切换。
 4. 旧 JM 压缩包可以手动保留，但不要把整个旧 `jm-tasks` 当成新任务队列导入。
-5. QQ 群文件容量已满时，Docker 版本同样无法上传。面板中的“上传器在线”只表示本地上传程序和依赖正常，不代表群文件空间充足。
+5. QQ 群文件容量已满时，Docker 版本同样无法上传。面板中的“JM Worker”正常只表示 worker 心跳存在，不代表群文件空间充足。
 6. 新面板默认只监听服务器的 `127.0.0.1:3000`，并要求设置用户名和密码。
 
 ## 如果服务器没有 Docker：Ubuntu 24.04 安装步骤

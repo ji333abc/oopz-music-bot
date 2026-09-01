@@ -11,28 +11,33 @@ docker compose up -d --build
 docker compose logs -f bot
 ```
 
-发布或升级前先保存数据和 Redis 快照：
+发布、升级、回滚和诊断统一使用仓库根目录入口：
 
 ```bash
-python scripts/backup.py --data-dir data --output backups/pre-deploy-$(date -u +%Y%m%dT%H%M%SZ).zip
-docker compose config --quiet
+./oopzctl diagnose --output diagnose.zip
+./oopzctl dependencies --output dependency-manifest.json
+./oopzctl backup --output backups/pre-deploy.zip
+./oopzctl backup verify backups/pre-deploy.zip
+./oopzctl upgrade --ref main --dry-run
+./oopzctl releases prune --keep 5
 ```
 
 备份默认不包含 `.env`。需要恢复时先停止 Bot，使用已校验的归档并显式确认：
 
 ```bash
-python scripts/restore.py backups/<verified-backup>.zip --data-dir data --component all --confirm
+./oopzctl restore backups/<verified-backup>.zip --component all --confirm
 docker compose up -d
 ```
 
 恢复会先自动备份当前数据，不使用删除数据卷的命令。
 
-更新：
+完成 dry-run 和审查后更新：
 
 ```bash
-git pull
-docker compose up -d --build
+./oopzctl upgrade --ref main
 ```
+
+升级会拒绝 dirty worktree、过宽的 `.env` 权限和 JM 开关/Profile 不一致，先创建并校验 data + Redis 备份；每个提交使用唯一 Bot/Panel/QQMusic/JM 镜像标签。readyz、Panel 容器健康和配置的公网 `/api/health` 任一失败时，只恢复 manifest 记录的旧代码/旧镜像，不自动覆盖数据。回滚使用 `./oopzctl rollback --release <ID>`。旧回滚点只由显式 `releases prune` 删除，且至少保留最近两个成功版本。
 
 停止：
 
@@ -40,9 +45,14 @@ docker compose up -d --build
 docker compose down
 ```
 
-Compose 同时启动 Bot、固定版本 QQ 音乐 API 和 Web 管理面板。音乐接口与机器人命令桥接只在 Compose 内部网络开放；面板默认映射到宿主机 `127.0.0.1:3000`。运行数据挂载到仓库的 `data/`。
+默认 Compose 启动 Bot、Redis、固定版本 QQ 音乐 API 和 Web 管理面板。音乐接口与机器人命令桥接只在 Compose 内部网络开放；面板默认映射到宿主机 `127.0.0.1:3000`。运行数据挂载到仓库的 `data/`。JM 使用独立镜像和 Profile：
 
-面板支持实时播放状态、完整待播队列、搜歌前 10 首、播放控制、删除指定队列歌曲、结构化频道成员、组件健康、真实事件及 JM 任务历史。浏览器不会获得 `QQBOT_BRIDGE_TOKEN`，所有控制请求由面板服务端转发。JM 和事件记录保存在 `data/panel-state.json`，不包含解压密码。
+```bash
+docker compose --profile jm up -d --build
+docker compose --profile jm logs -f jm-worker
+```
+
+面板通过 SSE 接收语义状态变化，断线时自动切换轮询；支持完整待播队列、鼠标/触摸/键盘拖拽排序、乐观版本冲突恢复、播放控制、诊断指标、结构化频道成员和 JM 历史。浏览器不会获得 `QQBOT_BRIDGE_TOKEN`，写操作仍由面板服务端 POST 转发。历史记录有固定容量，不包含解压密码、Cookie 或播放 URL。
 
 本机查看：
 
@@ -63,7 +73,20 @@ OOPZ_PANEL_PUBLIC_URL=https://panel.example.com
 
 RackNerd 流量卡片为可选功能；在 `.env` 填写 `RACKNERD_API_KEY` 和 `RACKNERD_API_HASH` 后生效。
 
-Bot 镜像已包含 OOPZ 运行时、Chromium、QQ/JM 机器人及 Node.js 文件上传器；QQ Music API 使用独立容器。长任务优先使用原消息进行被动回复，原消息过期或回复次数耗尽时会自动尝试群主动消息。群主仍需在 QQ 的机器人设置中允许主动消息，否则平台会拒绝该兜底发送。
+Nginx 代理事件流时必须关闭缓冲并给长连接足够的读取超时；普通页面/API 可继续使用既有规则：
+
+```nginx
+location /api/events {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 1h;
+    proxy_send_timeout 1h;
+}
+```
+
+默认 Bot 镜像只包含音乐运行时、Chromium 和 QQ Bot，不包含 JM Python/npm 依赖或上传器。`jm-worker` Profile 才包含这些组件。长任务结果仍由 Bot 发送；原消息过期或回复次数耗尽时会自动尝试群主动消息。
 
 从旧版 `main.py + qqbot_service.py` 部署迁移时，必须先停止两个旧进程再启动 Compose，避免同一 AppID 重复接收消息。将旧环境变量合并到根目录 `.env`，并把需要保留的数据复制到 `./data/` 后执行：
 

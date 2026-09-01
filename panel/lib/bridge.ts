@@ -4,6 +4,8 @@ const DEFAULT_COMMAND_ENDPOINT =
   "http://127.0.0.1:18080/internal/qqbot/command";
 const DEFAULT_SNAPSHOT_ENDPOINT =
   "http://127.0.0.1:18080/internal/panel/snapshot";
+const DEFAULT_EVENTS_ENDPOINT =
+  "http://127.0.0.1:18080/internal/panel/events";
 
 export type BridgeResult = Record<string, unknown> & {
   ok?: boolean;
@@ -20,6 +22,7 @@ export async function callBridge(
   command: string,
   requesterId: string,
   commandId = randomUUID(),
+  expectedVersion?: number,
 ): Promise<{
   response: Response;
   result: BridgeResult;
@@ -38,6 +41,7 @@ export async function callBridge(
       requester_name: `Web 面板 ${requesterId.slice(-8)}`,
       group_openid: "server-panel",
       command_id: commandId,
+      ...(expectedVersion === undefined ? {} : { expected_version: expectedVersion }),
     }),
     cache: "no-store",
     signal: AbortSignal.timeout(15_000),
@@ -59,4 +63,17 @@ export async function callSnapshot(): Promise<{
   });
   const result = (await response.json()) as BridgeResult;
   return { response, result };
+}
+
+export async function callPanelEvents(lastEventId?: string): Promise<Response> {
+  const endpoint =
+    process.env.OOPZBOT_PANEL_EVENTS_URL?.trim() || DEFAULT_EVENTS_ENDPOINT;
+  return fetch(endpoint, {
+    headers: {
+      "x-qqbot-bridge-token": bridgeToken(),
+      Accept: "text/event-stream",
+      ...(lastEventId ? { "Last-Event-ID": lastEventId } : {}),
+    },
+    cache: "no-store",
+  });
 }

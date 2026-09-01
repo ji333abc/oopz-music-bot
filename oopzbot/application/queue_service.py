@@ -15,6 +15,12 @@ class QueuePositionError(ValueError):
         super().__init__("queue position out of range")
 
 
+class QueueConflictError(RuntimeError):
+    def __init__(self, actual_version: int) -> None:
+        self.actual_version = max(0, int(actual_version))
+        super().__init__("queue version conflict")
+
+
 class QueueService:
     """Own one-based pending-queue semantics independently of persistence."""
 
@@ -30,8 +36,13 @@ class QueueService:
     def next_item(self) -> QueueItem | None:
         return self._queue.next_item()
 
-    def clear_pending(self) -> None:
-        self._queue.clear()
+    def clear_pending(self, expected_version: int | None = None) -> None:
+        try:
+            self._queue.clear(expected_version)
+        except RuntimeError as exc:
+            if "version conflict" in str(exc):
+                raise QueueConflictError(self.snapshot().version) from exc
+            raise
 
     def current(self) -> QueueItem | None:
         return self._queue.get_current()
@@ -42,7 +53,9 @@ class QueueService:
     def set_playback(self, state: PlaybackState) -> None:
         self._queue.set_playback_state(state)
 
-    def remove(self, positions: Sequence[int]) -> tuple[QueueItem, ...]:
+    def remove(
+        self, positions: Sequence[int], expected_version: int | None = None
+    ) -> tuple[QueueItem, ...]:
         normalized = tuple(sorted(set(int(value) for value in positions)))
         snapshot = self.snapshot()
         if (
@@ -52,6 +65,31 @@ class QueueService:
         ):
             raise QueuePositionError(snapshot.queue_length)
         try:
-            return tuple(self._queue.remove_positions(normalized))
+            return tuple(self._queue.remove_positions(normalized, expected_version))
+        except RuntimeError as exc:
+            if "version conflict" in str(exc):
+                raise QueueConflictError(self.snapshot().version) from exc
+            raise
         except IndexError as exc:
             raise QueuePositionError(self.snapshot().queue_length) from exc
+
+    def move(
+        self, source: int, target: int, expected_version: int | None = None
+    ) -> QueueSnapshot:
+        snapshot = self.snapshot()
+        if (
+            source < 1
+            or target < 1
+            or source > snapshot.queue_length
+            or target > snapshot.queue_length
+        ):
+            raise QueuePositionError(snapshot.queue_length)
+        try:
+            self._queue.move_position(source, target, expected_version)
+        except RuntimeError as exc:
+            if "version conflict" in str(exc):
+                raise QueueConflictError(self.snapshot().version) from exc
+            raise
+        except IndexError as exc:
+            raise QueuePositionError(self.snapshot().queue_length) from exc
+        return self.snapshot()

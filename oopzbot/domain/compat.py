@@ -342,6 +342,7 @@ def queue_snapshot_from_legacy(
     play_state: Mapping[str, Any] | None = None,
     *,
     degraded: bool = False,
+    version: int = 0,
 ) -> QueueSnapshot:
     current_item = queue_item_from_legacy(current) if current is not None else None
     pending_items = tuple(
@@ -357,6 +358,7 @@ def queue_snapshot_from_legacy(
         pending=pending_items,
         playback=playback,
         degraded=degraded,
+        version=max(0, int(version)),
     )
 
 
@@ -373,11 +375,16 @@ def command_request_from_legacy(value: Mapping[str, Any]) -> CommandRequest:
         text_channel_id=_first_text(data, "text_channel_id"),
         voice_channel_id=_first_text(data, "voice_channel_id"),
         bot_user_id=_first_text(data, "bot_user_id"),
+        expected_version=(
+            int(data["expected_version"])
+            if data.get("expected_version") is not None
+            else None
+        ),
     )
 
 
-def command_request_to_legacy(value: CommandRequest) -> dict[str, str]:
-    return {
+def command_request_to_legacy(value: CommandRequest) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "command": value.command,
         "requester_id": value.requester_id,
         "requester_name": value.requester_name,
@@ -389,6 +396,9 @@ def command_request_to_legacy(value: CommandRequest) -> dict[str, str]:
         "voice_channel_id": value.voice_channel_id,
         "bot_user_id": value.bot_user_id,
     }
+    if value.expected_version is not None:
+        payload["expected_version"] = value.expected_version
+    return payload
 
 
 def command_result_from_legacy(
@@ -430,6 +440,7 @@ def command_result_from_legacy(
         queue = queue_snapshot_from_legacy(
             current if isinstance(current, Mapping) else None,
             [item for item in pending if isinstance(item, Mapping)],
+            version=_integer(data.get("queue_version")),
         )
 
     playback = None
@@ -461,6 +472,7 @@ def command_result_from_legacy(
         "queue_items",
         "queue_all",
         "queue_length",
+        "queue_version",
         "current",
         "playing",
         "paused",
@@ -520,6 +532,7 @@ def command_result_to_legacy(value: CommandResult) -> dict[str, Any]:
             queue_item_to_display(item) for item in value.queue.pending
         ]
         payload["queue_length"] = value.queue.queue_length
+        payload["queue_version"] = value.queue.version
     if value.playback is not None:
         payload.update(
             {

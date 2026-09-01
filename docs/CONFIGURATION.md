@@ -107,6 +107,17 @@ oopzbot discover --area-id <域ID>
 | `QQ_MUSIC_COOKIE_API_URL` | 空 | QQ Music API 热更新地址；Compose 自动设置为 `http://qqmusic:3201` |
 | `QQ_MUSIC_QUALITY` | `320` | 主音质：`m4a/128/320/ape/flac` |
 | `QQ_MUSIC_FALLBACK_QUALITY` | `128` | 主地址不可用时的音质 |
+| `OOPZ_SEARCH_CACHE_ENABLED` | `true` | 是否启用进程内有界搜歌缓存 |
+| `OOPZ_SEARCH_CACHE_TTL_SECONDS` | `60` | 正常搜索结果缓存秒数，范围 5–600 |
+| `OOPZ_SEARCH_CACHE_MAX_ENTRIES` | `256` | 搜索缓存条目上限，范围 16–2048 |
+| `OOPZ_METRICS_WINDOW_SIZE` | `200` | 每个外部端点的滚动指标样本上限，范围 10–2000 |
+| `OOPZ_PLAYBACK_HISTORY_LIMIT` | `50` | 最近播放持久化上限，范围 10–500 |
+| `OOPZ_FAILURE_HISTORY_LIMIT` | `100` | 结构化失败记录上限，范围 10–1000 |
+| `OOPZ_COMMAND_HISTORY_LIMIT` | `200` | 命令耗时记录上限，范围 10–2000 |
+| `OOPZ_SEARCH_NEGATIVE_CACHE_TTL_SECONDS` | `10` | 正常空结果缓存秒数，范围 1–60 |
+| `OOPZ_PANEL_SSE_ENABLED` | `true` | 启用 Bot 到 Panel 的只读事件流；关闭后浏览器回退为轮询 |
+| `OOPZ_PANEL_SSE_HEARTBEAT_SECONDS` | `20` | SSE 心跳秒数，范围 15–25；心跳不生成完整快照 |
+| `OOPZ_PANEL_SSE_FALLBACK_POLL_SECONDS` | `60` | SSE 在线校准及断线回退轮询间隔，范围 10–300 秒 |
 
 旧版 Web 播放器通过 `web_token` Cookie 保护完整 `/api/` 接口。若本机 Nginx 只读页面需要长期代理
 `/api/status`、`/api/queue` 和 `/api/lyric`，应在 `.env` 设置独立随机值
@@ -134,7 +145,13 @@ Compose 部署会通过仅限内部网络的 `qqmusic:3201` 热更新 QQ Music A
 
 ## 可选后台任务
 
-`QQBOT_JM_ENABLED=false` 默认关闭。启用前需要安装 `.[jm]` 和上传器的 npm 依赖，并建议同时配置 `QQBOT_JM_ALLOWED_USER_OPENIDS`。
+`QQBOT_JM_ENABLED=false` 默认关闭。Compose 的默认 `core` 镜像不包含 `jmcomic`、PDF/ZIP 依赖、Node 或上传器；启用时设置 `QQBOT_JM_ENABLED=true`、建议配置 `QQBOT_JM_ALLOWED_USER_OPENIDS`，并使用：
+
+```bash
+docker compose --profile jm up -d --build
+```
+
+`jm-worker` 只接收 QQ App 凭据、Redis 地址和 JM 限制项，通过带租约的版本化 Redis 队列执行；没有 worker 心跳时 Bot 会明确回复服务不可用，不影响音乐和 Panel。非 Compose 安装使用 `--with-jm` 安装 worker 依赖后，也必须把 `oopzbot-jm-service` 作为独立进程运行并连接 Redis；Bot 内不再提供单进程下载/上传兼容路径。
 
 ## 检查
 

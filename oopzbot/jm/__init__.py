@@ -1,6 +1,1 @@
-"""JM download, upload, retention, and task coordination boundaries."""
-
-from .service import JMTaskCoordinator
-from .uploader import JMUploadError
-
-__all__ = ["JMTaskCoordinator", "JMUploadError"]
+"""JM worker contracts; execution adapters are imported only by the worker."""

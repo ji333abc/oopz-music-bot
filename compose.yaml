@@ -13,6 +13,7 @@ services:
     init: true
 
   qqmusic:
+    image: ${OOPZ_QQMUSIC_IMAGE:-oopz-qqmusic:local}
     build:
       context: .
       dockerfile: Dockerfile.qqmusic
@@ -35,7 +36,10 @@ services:
     init: true
 
   bot:
-    build: .
+    image: ${OOPZ_BOT_IMAGE:-oopz-bot:local}
+    build:
+      context: .
+      target: core
     restart: unless-stopped
     env_file:
       - .env
@@ -47,9 +51,6 @@ services:
       OOPZBOT_BRIDGE_HOST: 0.0.0.0
       OOPZBOT_BRIDGE_PRIVATE_NETWORK: "true"
       OOPZBOT_PANEL_STATE_FILE: /app/data/panel-state.json
-      QQBOT_JM_UPLOADER: /app/tools/qqbot-uploader/uploader.mjs
-      QQBOT_JM_TEMP_ROOT: /app/data/jm-tasks
-      QQBOT_JM_TIMING_PATH: /app/data/jm_timing.json
       OOPZBOT_USE_LEGACY_CORE: "true"
       OOPZ_LEGACY_DATA_DIR: /app/data/legacy
       OOPZ_LEGACY_SOURCE_ROOT: /app/legacy_oopzbot
@@ -88,13 +89,52 @@ services:
     init: true
     stop_grace_period: 30s
 
+  jm-worker:
+    profiles: ["jm"]
+    image: ${OOPZ_JM_IMAGE:-oopz-jm-worker:local}
+    build:
+      context: .
+      target: jm-worker
+    restart: unless-stopped
+    environment:
+      QQBOT_APP_ID: ${QQBOT_APP_ID:?QQBOT_APP_ID is required}
+      QQBOT_APP_SECRET: ${QQBOT_APP_SECRET:?QQBOT_APP_SECRET is required}
+      BOT_REDIS_HOST: redis
+      BOT_REDIS_PORT: "6379"
+      BOT_REDIS_PASSWORD: ""
+      QQBOT_JM_TEMP_ROOT: /app/data/jm-tasks
+      QQBOT_JM_UPLOADER: /app/tools/qqbot-uploader/uploader.mjs
+      QQBOT_JM_MAX_BYTES: ${QQBOT_JM_MAX_BYTES:-83886080}
+      QQBOT_JM_TIMEOUT_SECONDS: ${QQBOT_JM_TIMEOUT_SECONDS:-1200}
+      QQBOT_JM_UPLOAD_TIMEOUT_SECONDS: ${QQBOT_JM_UPLOAD_TIMEOUT_SECONDS:-900}
+    depends_on:
+      redis:
+        condition: service_started
+    volumes:
+      - ./data/jm-tasks:/app/data/jm-tasks
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "from oopzbot.jm.queue import RedisJMQueue; raise SystemExit(0 if RedisJMQueue().available() else 1)"
+      interval: 15s
+      timeout: 5s
+      retries: 4
+    init: true
+    stop_grace_period: 30s
+
   panel:
+    image: ${OOPZ_PANEL_IMAGE:-oopz-panel:local}
     build:
       context: ./panel
     restart: unless-stopped
     environment:
       OOPZBOT_BRIDGE_URL: http://bot:18080/internal/qqbot/command
       OOPZBOT_PANEL_SNAPSHOT_URL: http://bot:18080/internal/panel/snapshot
+      OOPZBOT_PANEL_EVENTS_URL: http://bot:18080/internal/panel/events
+      OOPZ_PANEL_SSE_ENABLED: ${OOPZ_PANEL_SSE_ENABLED:-true}
+      OOPZ_PANEL_SSE_FALLBACK_POLL_SECONDS: ${OOPZ_PANEL_SSE_FALLBACK_POLL_SECONDS:-60}
       QQBOT_BRIDGE_TOKEN: ${QQBOT_BRIDGE_TOKEN:?QQBOT_BRIDGE_TOKEN is required}
       OOPZ_PANEL_PUBLIC_URL: ${OOPZ_PANEL_PUBLIC_URL:-http://localhost:3000}
       OOPZ_PANEL_USERNAME: ${OOPZ_PANEL_USERNAME:-admin}

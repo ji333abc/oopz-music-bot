@@ -4,7 +4,7 @@ import { panelRequester } from "../../../lib/session";
 
 export async function POST(request: NextRequest) {
   try {
-    const input = (await request.json()) as { command?: unknown };
+    const input = (await request.json()) as { command?: unknown; expected_version?: unknown };
     const command = String(input.command || "").trim();
     if (!command || command.length > 150) {
       return NextResponse.json(
@@ -14,10 +14,21 @@ export async function POST(request: NextRequest) {
     }
 
     const requestedCommandId = request.headers.get("x-request-id") || undefined;
+    let expectedVersion: number | undefined;
+    if (input.expected_version !== undefined) {
+      expectedVersion = Number(input.expected_version);
+      if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0) {
+        return NextResponse.json(
+          { ok: false, message: "队列版本无效" },
+          { status: 400, headers: { "Cache-Control": "no-store" } },
+        );
+      }
+    }
     const { response, result } = await callBridge(
       command,
       panelRequester(request),
       requestedCommandId,
+      expectedVersion,
     );
     return NextResponse.json(result, {
       status: response.status,

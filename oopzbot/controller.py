@@ -7,6 +7,7 @@ import threading
 import time
 from collections import deque
 
+from .application.search_cache import SearchCache
 from .config import Settings
 from .music import QQMusic
 from .runtime import NameFacade, OopzRuntime, SenderFacade, VoiceFacade
@@ -19,11 +20,13 @@ class MusicQueue:
         self._items: deque[dict] = deque()
         self._current: dict | None = None
         self._play_state: dict = {}
+        self._version = 0
         self._lock = threading.RLock()
 
     def add_to_queue(self, item: dict) -> int:
         with self._lock:
             self._items.append(dict(item))
+            self._version += 1
             return len(self._items)
 
     def get_queue(self) -> list[dict]:
@@ -40,15 +43,22 @@ class MusicQueue:
 
     def play_next(self) -> dict | None:
         with self._lock:
-            return dict(self._items.popleft()) if self._items else None
+            if not self._items:
+                return None
+            self._version += 1
+            return dict(self._items.popleft())
 
-    def remove_positions(self, positions: list[int]) -> list[dict]:
+    def remove_positions(
+        self, positions: list[int], expected_version: int | None = None
+    ) -> list[dict]:
         """Remove one-based pending queue positions atomically.
 
         The currently playing song is intentionally not part of the numbered
         pending queue and is never removed by this operation.
         """
         with self._lock:
+            if expected_version is not None and expected_version != self._version:
+                raise RuntimeError("queue version conflict")
             normalized = sorted(set(positions))
             if not normalized:
                 return []
@@ -63,7 +73,29 @@ class MusicQueue:
                 for index, item in enumerate(items, 1)
                 if index not in selected
             )
+            self._version += 1
             return removed
+
+    def move_position(
+        self, source: int, target: int, expected_version: int | None = None
+    ) -> None:
+        with self._lock:
+            if expected_version is not None and expected_version != self._version:
+                raise RuntimeError("queue version conflict")
+            length = len(self._items)
+            if source < 1 or target < 1 or source > length or target > length:
+                raise IndexError("queue position out of range")
+            if source == target:
+                return
+            items = list(self._items)
+            item = items.pop(source - 1)
+            items.insert(target - 1, item)
+            self._items = deque(items)
+            self._version += 1
+
+    def get_version(self) -> int:
+        with self._lock:
+            return self._version
 
     def get_current(self) -> dict | None:
         with self._lock:
@@ -89,11 +121,16 @@ class MusicQueue:
         with self._lock:
             self._play_state = {}
 
-    def clear(self) -> None:
+    def clear(self, expected_version: int | None = None) -> None:
         with self._lock:
+            if expected_version is not None and expected_version != self._version:
+                raise RuntimeError("queue version conflict")
+            changed = bool(self._items)
             self._items.clear()
             self._current = None
             self._play_state = {}
+            if changed:
+                self._version += 1
 
 
 class MusicController:
@@ -101,6 +138,12 @@ class MusicController:
         self.settings = settings
         self.runtime = runtime
         self.platforms = {"qq": QQMusic(settings)}
+        self.search_cache = SearchCache(
+            enabled=settings.search_cache_enabled,
+            ttl_seconds=settings.search_cache_ttl_seconds,
+            negative_ttl_seconds=settings.search_negative_cache_ttl_seconds,
+            max_entries=settings.search_cache_max_entries,
+        )
         self.sender = SenderFacade(runtime)
         self.names = NameFacade(runtime)
         self.voice = VoiceFacade(runtime)
@@ -159,7 +202,24 @@ class MusicController:
 
     def search_candidates(self, keyword: str, platform: str = "qq", limit: int = 5) -> list[dict]:
         adapter = self.platforms.get(platform)
-        return adapter.search_many(keyword, limit=limit) if adapter else []
+        if adapter is None:
+            return []
+        normalized_limit = max(1, min(int(limit), 10))
+        load_failed = False
+
+        def load() -> list[dict]:
+            nonlocal load_failed
+            value = adapter.search_many(keyword, limit=normalized_limit)
+            load_failed = bool(getattr(adapter, "last_error", None))
+            return value
+
+        return self.search_cache.search(
+            platform,
+            keyword,
+            limit=normalized_limit,
+            loader=load,
+            cacheable=lambda _value: not load_failed,
+        )
 
     def _build_song_data_from_platform_data(
         self,

@@ -5,17 +5,17 @@
 ```text
 QQ SDK ─┐
         ├─> 18080 内部桥接 ─> CommandService
-Panel ──┘                         │
+Panel POST ┘                      │
                                  ├─> PlaybackService ─> Legacy OOPZ Runtime Adapter
                                  ├─> QueueService ─> QueuePort Adapter ─> Redis/内存降级
                                  └─> QQMusic Provider
 
+Bot StatePublisher ─> internal SSE ─> Panel 同源代理 ─> EventSource
 QQ SDK ─> ReplyPolicy
-       └> JM task coordinator ─> downloader/uploader/retention adapters
+       └> JM Job DTO ─> Redis queue/lease ─> jm-worker ─> uploader
 ```
 
-容器仍为 `redis`、`qqmusic`、`bot`、`panel`。Redis、QQMusic 和 18080 仅在 Compose
-网络中使用；Panel 与旧 Web 默认只绑定宿主机 `127.0.0.1`。
+默认容器为 `redis`、`qqmusic`、`bot`、`panel`；`jm-worker` 仅属于 `jm` Profile。Redis、QQMusic 和 18080 仅在 Compose 网络中使用；Panel 与旧 Web 默认只绑定宿主机 `127.0.0.1`。
 
 ## 模块所有权
 
@@ -26,7 +26,8 @@ QQ SDK ─> ReplyPolicy
 | 命令 | `oopzbot/commands` | 纯解析、别名注册表 |
 | HTTP | `oopzbot/http` | 内网和 Token 鉴权、输入校验 |
 | QQ | `oopzbot/qq` | QQ 文案清理、有限重试与主动发送降级 |
-| JM | `oopzbot/jm` | 子进程、上传、任务锁、清理策略 |
+| 指标/事件 | `oopzbot/metrics.py`、`state_publisher.py` | 有界延迟窗口、状态修订和 SSE 唤醒 |
+| JM | `oopzbot/jm`、`jm_service.py` | 版本化任务、Redis 租约、独立下载/上传与清理 |
 | 基础设施 | `oopzbot/infrastructure` | 旧队列到 QueuePort 的兼容转换 |
 | OOPZ | `oopzbot/legacy_runtime.py` | 凭据、WebSocket、Agora 和旧实现适配 |
 
@@ -34,11 +35,13 @@ QQ SDK ─> ReplyPolicy
 
 - QQ 与 Panel 的控制命令都进入 18080 的同一 `CommandService`。
 - 待播队列编号始终从 1 开始，当前歌曲不属于待播编号。
-- 批量删除先完整校验；Redis 使用单条 Lua 操作，内存队列使用同一临界区。
+- 删除、清空和重排先校验 `expected_version`；Redis 使用单条 Lua 操作，内存队列使用同一临界区。
+- 所有待播编号变化推进 area 隔离的 `queue_version`；当前歌曲永不参与重排。
 - Redis 键和旧扁平 JSON 保持不变。
 - Redis 降级队列或播放状态非空时不自动切回，防止静默丢队列；清空后才能切回真实 Redis。
 - QQ 被动回复最多重试一次，随后最多主动发送一次；无主动权限立即结束。
-- JM 子进程只获得允许列表中的环境变量。
+- JM worker 只获得 QQ App、Redis 和 JM 限制项，不获得 OOPZ、QQMusic 或 Panel Secret。
+- SSE 是只读状态通道；写操作始终走带 Token 的命令 POST，浏览器无法读取 Token。
 - 当前 OOPZ 实现通过日志和 `/readyz`、Panel 快照的 `runtime_implementation` 明示。
 
 ## 仍保留的兼容边界
@@ -56,15 +59,16 @@ Docker `COPY` 才能存在。
 - FastAPI 在后台线程监听；命令临界区继续使用既有 `_command_lock`，本轮未改变锁模型。
 - OOPZ WebSocket 使用旧核心已验证的分片工作队列、认证、心跳和重连实现。
 - Agora 播放与完成回调仍在旧运行时内；应用层通过 PlaybackService/Runtime Port 接触能力。
-- JM 下载与上传使用子进程，取消或超时会终止上传子进程并由 Service 释放任务锁。
-- Redis 批量删除在服务端 Lua 脚本内完成，避免跨线程或跨客户端的部分删除。
+- JM 下载与上传仅在可选 worker 中运行；Redis 租约和 processing 队列使崩溃任务在租约过期后恢复。
+- Redis 删除、清空与重排在服务端 Lua 脚本内完成，避免跨线程或跨客户端的部分修改。
+- SSE 发布器只保存有限修订号，心跳不计算快照；慢客户端在下一次读取时直接收敛到最新修订。
 
 ## 数据与持久化
 
 Compose 使用启用 AOF 的 Redis 保存播放队列。键名继续为 `music:queue`、
 `music:current`、`music:default_channel`、`music:play_state` 和 `music:play_mode`；带域时沿用
 原域隔离规则。`data/legacy/` 保存旧核心数据库、插件状态和登录凭据刷新结果，`data/` 还保存
-JM 状态。禁止使用 `docker compose down -v` 进行更新或回滚。
+JM 状态。队列版本使用 `music:queue_version`（带域时沿用 area 隔离）。禁止使用 `docker compose down -v` 进行更新或回滚。
 
 ## 安全边界
 

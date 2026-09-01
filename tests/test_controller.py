@@ -57,7 +57,11 @@ class _FakeRuntime:
 
 
 class _FakeMusic:
+    def __init__(self) -> None:
+        self.search_calls = 0
+
     def search_many(self, keyword: str, limit: int = 5):
+        self.search_calls += 1
         return [
             {
                 "id": keyword,
@@ -76,6 +80,15 @@ class _UnplayableMusic(_FakeMusic):
     def get_song_url(self, song_id: str):
         del song_id
         return None
+
+
+class _FailedSearchMusic(_FakeMusic):
+    last_error = {"type": "timeout"}
+
+    def search_many(self, keyword: str, limit: int = 5):
+        del keyword, limit
+        self.search_calls += 1
+        return []
 
 
 def _settings() -> Settings:
@@ -130,6 +143,19 @@ class MusicQueueTests(unittest.TestCase):
 
         self.assertEqual([song["name"] for song in queue.get_queue()], ["one"])
 
+    def test_move_position_updates_version_and_preserves_duplicates(self) -> None:
+        queue = MusicQueue()
+        for name in ("same", "two", "same"):
+            queue.add_to_queue({"name": name})
+        version = queue.get_version()
+
+        queue.move_position(1, 3, version)
+
+        self.assertEqual([song["name"] for song in queue.get_queue()], ["two", "same", "same"])
+        self.assertEqual(queue.get_version(), version + 1)
+        with self.assertRaisesRegex(RuntimeError, "version conflict"):
+            queue.move_position(1, 2, version)
+
 
 class MusicControllerTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -156,6 +182,24 @@ class MusicControllerTests(unittest.TestCase):
         self.assertEqual(second["code"], "success")
         self.assertEqual(self.runtime.played, ["https://audio.invalid/first.mp3"])
         self.assertEqual(self.controller._get_queue("area").get_queue_length(), 1)
+
+    def test_search_cache_is_shared_and_does_not_cache_play_urls(self) -> None:
+        music = self.controller.platforms["qq"]
+        first = self.controller.search_candidates("  same   song ", "qq", limit=5)
+        second = self.controller.search_candidates("same song", "qq", limit=5)
+
+        self.assertEqual(music.search_calls, 1)
+        self.assertEqual(first, second)
+        self.assertNotIn("url", first[0])
+
+    def test_search_adapter_failure_is_not_negative_cached(self) -> None:
+        music = _FailedSearchMusic()
+        self.controller.platforms["qq"] = music
+
+        self.controller.search_candidates("same", "qq", limit=5)
+        self.controller.search_candidates("same", "qq", limit=5)
+
+        self.assertEqual(music.search_calls, 2)
 
     def test_next_song_advances_queue(self) -> None:
         self.controller.play_song("first", "qq", "text", "area", "user")

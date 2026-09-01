@@ -3,36 +3,28 @@
 from __future__ import annotations
 
 import asyncio
-import json
+import hashlib
 import logging
-import math
 import os
 import re
 import secrets
-import shutil
-import statistics
-import subprocess
 import time
-from pathlib import Path
 from threading import Lock
 
 import botpy
 import requests
 from botpy.message import GroupMessage
 
-from .jm.downloader import download_album, inspect_album
-from .jm.retention import cleanup_later, cleanup_stale
+from .jm.contracts import JMJob
+from .jm.queue import RedisJMQueue
 from .jm.service import JMTaskCoordinator
-from .jm.uploader import JMUploadError, upload_archive
+from .metrics import CommandTiming, utc_now
 from .observability import command_context, ensure_command_id
 from .operations import operations
-from .process_env import minimal_child_environment
 from .qq.formatter import plain_text as _format_qq_plain_text
 from .qq.reply_policy import ReplyErrorKind, ReplyPolicy, classify_reply_error
 
 logger = logging.getLogger("QQBotService")
-
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 APP_ID = (os.getenv("QQBOT_APP_ID") or "").strip()
 APP_SECRET = (os.getenv("QQBOT_APP_SECRET") or "").strip()
@@ -52,41 +44,14 @@ JM_ENABLED = (os.getenv("QQBOT_JM_ENABLED") or "").strip().lower() in {
     "yes",
     "on",
 }
-JM_PYTHON = (
-    os.getenv("QQBOT_JM_PYTHON")
-    or os.getenv("PYTHON", "")
-    or __import__("sys").executable
-).strip()
-JM_WORKER = (
-    os.getenv("QQBOT_JM_WORKER")
-    or str(Path(__file__).with_name("jm_worker.py"))
-).strip()
-JM_TEMP_ROOT = Path(
-    os.getenv("QQBOT_JM_TEMP_ROOT") or str(_PROJECT_ROOT / "data" / "jm-tasks")
-)
 JM_MAX_BYTES = int(os.getenv("QQBOT_JM_MAX_BYTES") or str(80 * 1024 * 1024))
 JM_TIMEOUT_SECONDS = int(os.getenv("QQBOT_JM_TIMEOUT_SECONDS") or "1200")
-JM_NODE = (os.getenv("QQBOT_JM_NODE") or "node").strip()
-JM_UPLOADER = (
-    os.getenv("QQBOT_JM_UPLOADER")
-    or str(_PROJECT_ROOT / "tools" / "qqbot-uploader" / "uploader.mjs")
-).strip()
 JM_UPLOAD_TIMEOUT_SECONDS = int(
     os.getenv("QQBOT_JM_UPLOAD_TIMEOUT_SECONDS") or "900"
-)
-JM_FAILURE_RETAIN_SECONDS = int(
-    os.getenv("QQBOT_JM_FAILURE_RETAIN_SECONDS") or "1800"
-)
-JM_INSPECT_TIMEOUT_SECONDS = int(
-    os.getenv("QQBOT_JM_INSPECT_TIMEOUT_SECONDS") or "30"
 )
 JM_BATCH_MAX_ITEMS = max(
     1,
     int(os.getenv("QQBOT_JM_BATCH_MAX_ITEMS") or "3"),
-)
-JM_TIMING_PATH = Path(
-    os.getenv("QQBOT_JM_TIMING_PATH")
-    or str(_PROJECT_ROOT / "data" / "jm_timing.json")
 )
 JM_ALLOWED_USERS = {
     item.strip()
@@ -107,7 +72,6 @@ _seen_messages: dict[str, float] = {}
 _seen_lock = Lock()
 _jm_coordinator = JMTaskCoordinator()
 _jm_job_lock = _jm_coordinator.lock
-_jm_timing_lock = Lock()
 _jm_tasks = _jm_coordinator.tasks
 _command_tasks: set[asyncio.Task] = set()
 _msg_seq_lock = Lock()
@@ -151,182 +115,11 @@ def _parse_jm_album_ids(command: str) -> list[str]:
     return list(dict.fromkeys(re.findall(r"\d{1,12}", match.group(1))))
 
 
-def _jm_worker_environment(password: str = "") -> dict[str, str]:
-    environment = minimal_child_environment(("QQBOT_JM_MAX_BYTES",))
-    if password:
-        environment["JM_ZIP_PASSWORD"] = password
-    return environment
-
-
-def _jm_uploader_environment() -> dict[str, str]:
-    return minimal_child_environment(
-        (
-            "QQBOT_APP_ID",
-            "QQBOT_APP_SECRET",
-            "QQBOT_JM_MAX_BYTES",
-            "QQBOT_JM_TEMP_ROOT",
-        )
-    )
-
-
-def _inspect_jm_album(album_id: str) -> int:
-    return inspect_album(
-        python=JM_PYTHON,
-        worker=JM_WORKER,
-        album_id=album_id,
-        environment=_jm_worker_environment(),
-        timeout_seconds=JM_INSPECT_TIMEOUT_SECONDS,
-    )
-
-
-def _load_jm_timing_samples() -> list[dict]:
+def _safe_update_jm_job(job_id: str, **changes) -> None:
     try:
-        data = json.loads(JM_TIMING_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    samples = data.get("samples", []) if isinstance(data, dict) else []
-    return [item for item in samples if isinstance(item, dict)][-20:]
-
-
-def _median_or_default(values: list[float], default: float) -> float:
-    usable = [value for value in values if math.isfinite(value) and value > 0]
-    return statistics.median(usable) if usable else default
-
-
-def _estimate_jm_seconds(page_count: int) -> int:
-    samples = _load_jm_timing_samples()
-    sampled_pages = sum(
-        max(0, int(item.get("page_count") or 0)) for item in samples
-    )
-    # A small album contains proportionally more connection/setup overhead and can
-    # badly overestimate a large album.  Blend in history gradually until roughly
-    # 200 successfully processed pages have been observed.
-    confidence = min(1.0, sampled_pages / 200)
-
-    def blended(observed: float, default: float) -> float:
-        return default * (1 - confidence) + observed * confidence
-
-    observed_download_per_page = _median_or_default(
-        [
-            float(item.get("download_seconds", 0)) / float(item.get("page_count", 0))
-            for item in samples
-            if float(item.get("page_count", 0)) > 0
-        ],
-        0.20,
-    )
-    download_per_page = blended(observed_download_per_page, 0.20)
-    observed_processing_per_page = _median_or_default(
-        [
-            float(item.get("processing_seconds", 0))
-            / float(item.get("page_count", 0))
-            for item in samples
-            if float(item.get("page_count", 0)) > 0
-        ],
-        0.30,
-    )
-    processing_per_page = blended(observed_processing_per_page, 0.30)
-    observed_bytes_per_page = _median_or_default(
-        [
-            float(item.get("archive_bytes", 0)) / float(item.get("page_count", 0))
-            for item in samples
-            if float(item.get("page_count", 0)) > 0
-        ],
-        160 * 1024,
-    )
-    bytes_per_page = blended(observed_bytes_per_page, 160 * 1024)
-    observed_upload_bytes_per_second = _median_or_default(
-        [
-            float(item.get("archive_bytes", 0))
-            / float(item.get("upload_seconds", 0))
-            for item in samples
-            if float(item.get("upload_seconds", 0)) > 0
-        ],
-        2 * 1024 * 1024,
-    )
-    upload_bytes_per_second = blended(
-        observed_upload_bytes_per_second,
-        2 * 1024 * 1024,
-    )
-    observed_fixed_seconds = _median_or_default(
-        [
-            max(
-                0.0,
-                float(item.get("total_seconds", 0))
-                - float(item.get("download_seconds", 0))
-                - float(item.get("processing_seconds", 0))
-                - float(item.get("upload_seconds", 0)),
-            )
-            for item in samples
-            if float(item.get("total_seconds", 0)) > 0
-        ],
-        15.0,
-    )
-    fixed_seconds = blended(observed_fixed_seconds, 15.0)
-    seconds = (
-        fixed_seconds
-        + page_count * download_per_page
-        + page_count * processing_per_page
-        + page_count * bytes_per_page / upload_bytes_per_second
-    )
-    return max(30, int(math.ceil(seconds / 10) * 10))
-
-
-def _record_jm_timing(sample: dict) -> None:
-    with _jm_timing_lock:
-        samples = _load_jm_timing_samples()
-        samples.append(sample)
-        JM_TIMING_PATH.parent.mkdir(parents=True, exist_ok=True)
-        temporary = JM_TIMING_PATH.with_suffix(JM_TIMING_PATH.suffix + ".tmp")
-        temporary.write_text(
-            json.dumps({"samples": samples[-20:]}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        temporary.replace(JM_TIMING_PATH)
-
-
-def _run_jm_download(album_id: str, password: str, job_dir: Path) -> tuple[Path, dict]:
-    return download_album(
-        python=JM_PYTHON,
-        worker=JM_WORKER,
-        album_id=album_id,
-        job_dir=job_dir,
-        environment=_jm_worker_environment(password),
-        timeout_seconds=JM_TIMEOUT_SECONDS,
-    )
-
-
-async def _run_jm_upload(
-    archive: Path,
-    group_openid: str,
-    message_id: str,
-    display_name: str,
-) -> dict:
-    return await upload_archive(
-        node=JM_NODE,
-        uploader=JM_UPLOADER,
-        archive=archive,
-        group_openid=group_openid,
-        message_id=message_id,
-        display_name=display_name,
-        environment=_jm_uploader_environment(),
-        timeout_seconds=JM_UPLOAD_TIMEOUT_SECONDS,
-        logger=logger,
-    )
-
-
-async def _cleanup_jm_job_later(
-    job_dir: Path,
-    delay_seconds: int = JM_FAILURE_RETAIN_SECONDS,
-) -> None:
-    await cleanup_later(job_dir, delay_seconds=delay_seconds, logger=logger)
-
-
-def _cleanup_stale_jm_jobs() -> None:
-    cleanup_stale(
-        JM_TEMP_ROOT,
-        retain_seconds=JM_FAILURE_RETAIN_SECONDS,
-        logger=logger,
-    )
+        operations.update_jm_job(job_id, **changes)
+    except Exception:
+        logger.exception("记录 JM 诊断状态时发生错误: job_id=%s", job_id)
 
 
 def _is_duplicate(message_id: str) -> bool:
@@ -785,277 +578,6 @@ class OopzQQClient(botpy.Client):
             proactive=proactive,
         )
 
-    async def _run_jm_job(
-        self,
-        message: GroupMessage,
-        album_id: str,
-        page_count: int | None = None,
-        *,
-        send_result: bool = True,
-        release_lock: bool = True,
-        job_id: str = "",
-    ) -> dict:
-        job_dir = JM_TEMP_ROOT / f"jm-{album_id}-{secrets.token_hex(8)}"
-        alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
-        password = "".join(secrets.choice(alphabet) for _ in range(14))
-        keep_for_debug = False
-        archive_created = False
-        job_started = time.monotonic()
-
-        try:
-            if job_id:
-                operations.update_jm_job(
-                    job_id,
-                    status="running",
-                    phase="downloading",
-                    page_count=page_count,
-                )
-            archive, download_result = await asyncio.to_thread(
-                _run_jm_download,
-                album_id,
-                password,
-                job_dir,
-            )
-            archive_created = True
-            archive_size = archive.stat().st_size
-            if archive_size > JM_MAX_BYTES:
-                limit_mib = JM_MAX_BYTES / 1024 / 1024
-                actual_mib = archive_size / 1024 / 1024
-                raise RuntimeError(
-                    f"压缩包 {actual_mib:.1f} MiB，超过 {limit_mib:.0f} MiB 上限"
-                )
-
-            logger.info(
-                "开始通过 QQ 分片接口上传 JM 文件: album_id=%s size=%s",
-                album_id,
-                archive_size,
-            )
-            if job_id:
-                operations.update_jm_job(
-                    job_id,
-                    status="running",
-                    phase="uploading",
-                    archive_bytes=archive_size,
-                    page_count=page_count or int(download_result.get("page_count") or 0),
-                )
-            upload_started = time.monotonic()
-            await _run_jm_upload(
-                archive=archive,
-                group_openid=str(message.group_openid),
-                message_id=str(message.id),
-                display_name=f"JM{album_id}.zip",
-            )
-            upload_seconds = time.monotonic() - upload_started
-            measured_pages = int(download_result.get("page_count") or 0)
-            timing_pages = page_count or measured_pages
-            total_seconds = time.monotonic() - job_started
-            if timing_pages > 0:
-                await asyncio.to_thread(
-                    _record_jm_timing,
-                    {
-                        "timestamp": int(time.time()),
-                        "album_id": album_id,
-                        "page_count": timing_pages,
-                        "download_seconds": float(
-                            download_result.get("download_seconds") or 0
-                        ),
-                        "processing_seconds": float(
-                            download_result.get("processing_seconds") or 0
-                        ),
-                        "upload_seconds": round(upload_seconds, 3),
-                        "archive_bytes": archive_size,
-                        "total_seconds": round(total_seconds, 3),
-                    },
-                )
-            failed_images = int(download_result.get("failed_images") or 0)
-            failed_photos = int(download_result.get("failed_photos") or 0)
-            output_format = str(download_result.get("output_format") or "images")
-            pdf_quality = download_result.get("pdf_quality")
-            fallback_reason = str(download_result.get("fallback_reason") or "").strip()
-            if output_format == "pdf":
-                content_note = f"\n内容：PDF（质量 {pdf_quality}）"
-            else:
-                content_note = "\n内容：原始图片"
-                if fallback_reason:
-                    content_note += "（PDF 生成失败或超过大小限制）"
-            warning = ""
-            if failed_images or failed_photos:
-                warning = (
-                    f"\n⚠️ 本次有 {failed_images} 张图片、"
-                    f"{failed_photos} 个章节下载失败，压缩包可能不完整"
-                )
-            if send_result:
-                await self._reply(
-                    message,
-                    f"JM{album_id}.zip 上传完成"
-                    f"{content_note}\n解压密码：{password}"
-                    f"\n实际用时：{math.ceil(total_seconds)} 秒{warning}",
-                    msg_seq=3,
-                )
-            logger.info(
-                "JM 任务完成: album_id=%s size=%s",
-                album_id,
-                archive_size,
-            )
-            if job_id:
-                operations.update_jm_job(
-                    job_id,
-                    status="completed",
-                    phase="completed",
-                    archive_bytes=archive_size,
-                )
-            operations.record_event(
-                "jm",
-                f"JM{album_id} 上传完成",
-                source="JM 上传器",
-            )
-            return {
-                "ok": True,
-                "album_id": album_id,
-                "password": password,
-                "seconds": math.ceil(total_seconds),
-                "warning": warning.strip(),
-            }
-        except subprocess.TimeoutExpired:
-            logger.warning("JM 任务超时: album_id=%s", album_id)
-            error_text = "下载超时，任务已停止"
-            if job_id:
-                operations.update_jm_job(
-                    job_id,
-                    status="timeout",
-                    phase="timeout",
-                    error=error_text,
-                )
-            operations.record_event(
-                "jm",
-                f"JM{album_id} {error_text}",
-                level="error",
-                source="JM 下载器",
-            )
-            if send_result:
-                await self._reply(
-                    message,
-                    f"JM{album_id} {error_text}",
-                    msg_seq=2,
-                )
-            return {"ok": False, "album_id": album_id, "error": error_text}
-        except Exception as exc:
-            logger.exception("JM 任务失败: album_id=%s", album_id)
-            if archive_created:
-                keep_for_debug = True
-                logger.error(
-                    "JM 失败任务文件保留 %s 秒: %s",
-                    JM_FAILURE_RETAIN_SECONDS,
-                    job_dir,
-                )
-            if isinstance(exc, JMUploadError):
-                error_messages = {
-                    "quota": "QQ 文件上传今日额度已用完，请明天再试",
-                    "auth": "QQ 文件上传认证失败，请联系管理员检查配置",
-                    "size": "文件超过 QQ 平台允许的大小",
-                    "timeout": "QQ 文件上传超时，请稍后再试",
-                    "network": "QQ 文件上传网络异常，请稍后再试",
-                }
-                error_text = error_messages.get(
-                    exc.error_type,
-                    f"QQ 文件上传失败：{str(exc)}",
-                )
-            else:
-                error_text = str(exc).replace("\n", " ")[-500:]
-            if job_id:
-                operations.update_jm_job(
-                    job_id,
-                    status="failed",
-                    phase="failed",
-                    error=error_text,
-                )
-            operations.record_event(
-                "jm",
-                f"JM{album_id} 失败：{error_text}",
-                level="error",
-                source="JM 任务",
-            )
-            if send_result:
-                await self._reply(
-                    message,
-                    f"JM{album_id} 任务失败：{error_text}",
-                    msg_seq=2,
-                )
-            return {"ok": False, "album_id": album_id, "error": error_text}
-        finally:
-            if keep_for_debug:
-                cleanup_task = asyncio.create_task(
-                    _cleanup_jm_job_later(job_dir)
-                )
-                _jm_coordinator.track(cleanup_task)
-            else:
-                await asyncio.to_thread(shutil.rmtree, job_dir, True)
-            if release_lock:
-                _jm_coordinator.release()
-
-    async def _run_jm_batch(
-        self,
-        message: GroupMessage,
-        jobs: list[tuple[str, int | None, str]],
-    ) -> None:
-        batch_started = time.monotonic()
-        try:
-            for index, (album_id, page_count, job_id) in enumerate(jobs, start=1):
-                result = await self._run_jm_job(
-                    message,
-                    album_id,
-                    page_count,
-                    send_result=False,
-                    release_lock=False,
-                    job_id=job_id,
-                )
-                if result.get("ok"):
-                    lines = [
-                        f"✅ [{index}/{len(jobs)}] JM{album_id}.zip 上传完成",
-                        f"解压密码：{result['password']}",
-                        f"本项用时：{result['seconds']} 秒",
-                    ]
-                    if result.get("warning"):
-                        lines.append("⚠️ 本项存在下载失败图片，压缩包可能不完整")
-                else:
-                    detail = str(result.get("error") or "未知错误")
-                    lines = [
-                        f"❌ [{index}/{len(jobs)}] JM{album_id} 任务失败",
-                        detail[:300],
-                    ]
-                if index == len(jobs):
-                    lines.extend(
-                        [
-                            "批量任务已全部处理完毕",
-                            f"总用时：{math.ceil(time.monotonic() - batch_started)} 秒",
-                        ]
-                    )
-                try:
-                    await self._reply(
-                        message,
-                        "\n".join(lines),
-                        msg_seq=index + 1,
-                    )
-                except Exception:
-                    logger.exception(
-                        "JM 批量任务结果通知失败: album_id=%s",
-                        album_id,
-                    )
-                    if result.get("ok"):
-                        # 不把一次性解压密码写入持久日志；通知失败时应重新执行任务。
-                        logger.error(
-                            "JM 批量任务通知失败，解压密码未记录: album_id=%s",
-                            album_id,
-                        )
-        except Exception:
-            logger.exception("JM 批量任务运行失败")
-            await self._reply(
-                message,
-                "JM 批量任务异常停止，请查看服务日志",
-                msg_seq=2,
-            )
-        finally:
-            _jm_coordinator.release()
 
     async def _start_jm_job(
         self,
@@ -1063,52 +585,7 @@ class OopzQQClient(botpy.Client):
         album_id: str,
         requester_id: str,
     ) -> None:
-        if not JM_ENABLED:
-            await self._reply(message, "JM 下载功能尚未启用")
-            return
-        if JM_ALLOWED_USERS and requester_id not in JM_ALLOWED_USERS:
-            await self._reply(message, "你没有使用 JM 下载功能的权限")
-            return
-        if not _jm_coordinator.acquire():
-            await self._reply(message, "已有一个 JM 下载任务正在运行，请稍后再试")
-            return
-
-        job_id = ""
-        try:
-            job_id = operations.begin_jm_job(album_id, requester="QQ 群用户")
-            page_count: int | None = None
-            try:
-                page_count = await asyncio.to_thread(_inspect_jm_album, album_id)
-                operations.update_jm_job(job_id, page_count=page_count)
-                estimated_seconds = _estimate_jm_seconds(page_count)
-                estimate_text = (
-                    f"\n页数：{page_count} 页"
-                    f"\n预计约 {estimated_seconds} 秒"
-                )
-            except Exception as exc:
-                logger.warning("JM 页数查询失败: album_id=%s error=%s", album_id, exc)
-                estimate_text = "\n预计时间：暂时无法计算"
-            await self._reply(
-                message,
-                f"已开始下载 JM{album_id}"
-                f"{estimate_text}"
-                "\n当前一次只处理一个任务",
-                msg_seq=1,
-            )
-            task = asyncio.create_task(
-                self._run_jm_job(message, album_id, page_count, job_id=job_id)
-            )
-            _jm_coordinator.track(task)
-        except Exception as exc:
-            if job_id:
-                operations.update_jm_job(
-                    job_id,
-                    status="failed",
-                    phase="failed",
-                    error=f"启动任务失败：{type(exc).__name__}",
-                )
-            _jm_coordinator.release()
-            raise
+        await self._start_jm_batch(message, [album_id], requester_id)
 
     async def _start_jm_batch(
         self,
@@ -1116,9 +593,6 @@ class OopzQQClient(botpy.Client):
         album_ids: list[str],
         requester_id: str,
     ) -> None:
-        if len(album_ids) == 1:
-            await self._start_jm_job(message, album_ids[0], requester_id)
-            return
         if not JM_ENABLED:
             await self._reply(message, "JM 下载功能尚未启用")
             return
@@ -1135,74 +609,117 @@ class OopzQQClient(botpy.Client):
             await self._reply(message, "已有一个 JM 下载任务正在运行，请稍后再试")
             return
 
-        created_job_ids: list[str] = []
+        await self._start_external_jm_jobs(message, album_ids, requester_id)
+
+    async def _start_external_jm_jobs(
+        self,
+        message: GroupMessage,
+        album_ids: list[str],
+        requester_id: str,
+    ) -> None:
+        """Submit JM work without importing or running JM packages in the bot."""
+
+        queue = RedisJMQueue()
+        if not await asyncio.to_thread(queue.available):
+            _jm_coordinator.release()
+            await self._reply(message, "JM 服务未启用或当前不可用")
+            return
+
+        jobs: list[tuple[JMJob, str]] = []
+        requester_ref = hashlib.sha256(requester_id.encode("utf-8")).hexdigest()[:16]
+        alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
         try:
-            async def inspect(album_id: str) -> tuple[str, int | None]:
-                for attempt in range(1, 3):
-                    try:
-                        page_count = await asyncio.to_thread(
-                            _inspect_jm_album,
-                            album_id,
-                        )
-                        return album_id, page_count
-                    except Exception as exc:
-                        logger.warning(
-                            "JM 页数查询失败: album_id=%s attempt=%s error=%s",
-                            album_id,
-                            attempt,
-                            exc,
-                        )
-                        if attempt == 1:
-                            await asyncio.sleep(1)
-                return album_id, None
-
-            # JM 元数据端点对并发请求不稳定；按输入顺序逐个查询更可靠。
-            jobs: list[tuple[str, int | None, str]] = []
-            for index, album_id in enumerate(album_ids, start=1):
-                job_id = operations.begin_jm_job(
-                    album_id,
-                    requester="QQ 群用户",
-                    batch_index=index,
-                    batch_total=len(album_ids),
+            for index, album_id in enumerate(album_ids, 1):
+                try:
+                    job_id = operations.begin_jm_job(
+                        album_id,
+                        requester="QQ 群用户",
+                        batch_index=index,
+                        batch_total=len(album_ids),
+                    )
+                except Exception:
+                    job_id = secrets.token_hex(16)
+                    logger.exception(
+                        "创建 JM 诊断记录失败，继续提交 worker: job_id=%s",
+                        job_id,
+                    )
+                password = "".join(secrets.choice(alphabet) for _ in range(14))
+                job = JMJob(
+                    job_id=job_id,
+                    album_id=album_id,
+                    requester_ref=requester_ref,
+                    group_openid=str(message.group_openid),
+                    message_id=str(message.id),
+                    password=password,
+                    max_archive_bytes=JM_MAX_BYTES,
+                    timeout_seconds=JM_TIMEOUT_SECONDS,
+                    lease_seconds=JM_TIMEOUT_SECONDS + JM_UPLOAD_TIMEOUT_SECONDS + 60,
                 )
-                created_job_ids.append(job_id)
-                inspected_id, page_count = await inspect(album_id)
-                operations.update_jm_job(job_id, page_count=page_count)
-                jobs.append((inspected_id, page_count, job_id))
-            estimates = [
-                _estimate_jm_seconds(page_count)
-                for _, page_count, _ in jobs
-                if page_count
-            ]
-            lines = [
-                f"已开始 JM 批量任务，共 {len(jobs)} 个",
-                "将按以下顺序逐个下载并上传：",
-            ]
-            for index, (album_id, page_count, _job_id) in enumerate(jobs, start=1):
-                if page_count:
-                    estimate = _estimate_jm_seconds(page_count)
-                    detail = f"{page_count} 页，约 {estimate} 秒"
-                else:
-                    detail = "页数和时间暂时无法计算"
-                lines.append(f"{index}. JM{album_id}（{detail}）")
-            if len(estimates) == len(jobs):
-                lines.append(f"预计总用时：约 {sum(estimates)} 秒")
-            elif estimates:
-                lines.append(f"已知任务预计至少需要：约 {sum(estimates)} 秒")
-            await self._reply(message, "\n".join(lines), msg_seq=1)
-
-            task = asyncio.create_task(self._run_jm_batch(message, jobs))
-            _jm_coordinator.track(task)
+                jobs.append((job, job_id))
+            await asyncio.to_thread(queue.submit_many, [job for job, _ in jobs])
         except Exception as exc:
-            for job_id in created_job_ids:
-                operations.update_jm_job(
+            for _, job_id in jobs:
+                _safe_update_jm_job(
                     job_id,
                     status="failed",
                     phase="failed",
-                    error=f"启动批量任务失败：{type(exc).__name__}",
+                    error=f"提交 JM worker 失败：{type(exc).__name__}",
                 )
             _jm_coordinator.release()
             raise
+
+        for _, job_id in jobs:
+            _safe_update_jm_job(job_id, phase="queued")
+        task = asyncio.create_task(self._watch_external_jm_jobs(message, queue, jobs))
+        _jm_coordinator.track(task)
+        try:
+            await self._reply(
+                message,
+                f"已提交 JM 任务，共 {len(jobs)} 个；由独立 worker 顺序处理",
+                msg_seq=1,
+            )
+        except Exception:
+            logger.exception("JM 已提交但确认消息发送失败")
+
+    async def _watch_external_jm_jobs(
+        self,
+        message: GroupMessage,
+        queue: RedisJMQueue,
+        jobs: list[tuple[JMJob, str]],
+    ) -> None:
+        try:
+            for index, (job, job_id) in enumerate(jobs, 1):
+                deadline = time.monotonic() + JM_TIMEOUT_SECONDS + JM_UPLOAD_TIMEOUT_SECONDS
+                result = None
+                while time.monotonic() < deadline:
+                    result = await asyncio.to_thread(queue.result, job_id)
+                    if result is not None:
+                        break
+                    await asyncio.sleep(2)
+                if result is None:
+                    result = {"ok": False, "error": "JM worker 结果等待超时"}
+                if result.get("ok"):
+                    _safe_update_jm_job(
+                        job_id,
+                        status="completed",
+                        phase="completed",
+                        page_count=int(result.get("page_count") or 0),
+                        archive_bytes=int(result.get("archive_bytes") or 0),
+                    )
+                    text = (
+                        f"✅ [{index}/{len(jobs)}] JM{job.album_id}.zip 上传完成"
+                        f"\n解压密码：{job.password}"
+                        f"\n用时：{int(result.get('seconds') or 0)} 秒"
+                    )
+                else:
+                    error = str(result.get("error") or "JM worker 处理失败")[-500:]
+                    _safe_update_jm_job(
+                        job_id, status="failed", phase="failed", error=error
+                    )
+                    text = f"❌ [{index}/{len(jobs)}] JM{job.album_id} 任务失败\n{error}"
+                await self._reply(message, text, msg_seq=index + 1)
+        finally:
+            _jm_coordinator.release()
 
     async def _deliver_deferred_command(
         self,
@@ -1323,6 +840,19 @@ class OopzQQClient(botpy.Client):
                 timeout=COMMAND_DEFER_SECONDS,
             )
         except TimeoutError:
+            try:
+                operations.record_command_timing(
+                    CommandTiming(
+                        command_id=command_id,
+                        source="qq",
+                        kind=f"{command.split(' ', 1)[0] or 'unknown'}:accepted",
+                        ok=True,
+                        duration_ms=COMMAND_DEFER_SECONDS * 1000,
+                        created_at=utc_now(),
+                    )
+                )
+            except Exception as exc:
+                logger.warning("记录延迟命令接受耗时失败: %s", type(exc).__name__)
             delivery_task = asyncio.create_task(
                 self._deliver_deferred_command(
                     message,
@@ -1365,25 +895,6 @@ def main() -> None:
     ]
     if missing:
         raise SystemExit("缺少环境变量: " + ", ".join(missing))
-
-    if JM_ENABLED:
-        if not Path(JM_UPLOADER).is_file():
-            raise SystemExit(f"JM QQ 上传器不存在: {JM_UPLOADER}")
-        if not Path(JM_NODE).is_file() and shutil.which(JM_NODE) is None:
-            raise SystemExit(f"Node.js 不存在: {JM_NODE}")
-        sdk_package = (
-            Path(JM_UPLOADER).parent
-            / "node_modules"
-            / "@tencent-connect"
-            / "qqbot-nodejs"
-            / "package.json"
-        )
-        if not sdk_package.is_file():
-            raise SystemExit(
-                "JM QQ 上传器依赖尚未安装，请在 tools/qqbot-uploader 执行 npm ci"
-            )
-        JM_TEMP_ROOT.mkdir(parents=True, exist_ok=True)
-        _cleanup_stale_jm_jobs()
 
     intents = botpy.Intents(public_messages=True)
     client = OopzQQClient(intents=intents)

@@ -32,7 +32,7 @@ except ImportError:
     sys.modules["fastapi"] = fastapi_module
     sys.modules["fastapi.responses"] = responses_module
 
-from oopzbot import bridge
+from oopzbot import bridge, health
 from oopzbot.operations import COMPONENT_STATUSES, OperationsRegistry
 
 
@@ -146,6 +146,21 @@ class HealthSnapshotTests(unittest.TestCase):
             entry = bridge._health_entry("error", "request token=bridge-secret-value")
 
         self.assertNotIn("bridge-secret-value", entry["reason"])
+
+    def test_jm_health_uses_worker_heartbeat_not_local_uploader(self) -> None:
+        with (
+            patch.dict(os.environ, {"QQBOT_JM_ENABLED": "true"}, clear=False),
+            patch(
+                "oopzbot.jm.queue.RedisJMQueue",
+                return_value=types.SimpleNamespace(available=lambda: True),
+            ),
+            patch.object(health.requests, "get") as request,
+        ):
+            request.return_value.raise_for_status.return_value = None
+            snapshot = health.service_health(None)
+
+        self.assertEqual(snapshot["jm_worker"]["status"], "ok")
+        self.assertNotIn("uploader", snapshot)
 
     def test_readyz_is_not_ready_without_the_music_handler(self) -> None:
         with patch.object(bridge.requests, "get", side_effect=OSError("offline")):
