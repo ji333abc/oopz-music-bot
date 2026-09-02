@@ -193,6 +193,22 @@ class _InMemoryRedis:
             self._kv[version_key] = int(self._kv.get(version_key, 0) or 0) + 1
             return value
 
+    def queue_snapshot(
+        self,
+        queue_key: str,
+        current_key: str,
+        play_state_key: str,
+        version_key: str,
+    ) -> tuple:
+        """Read the queue payload and version from one in-memory critical section."""
+        with self._condition:
+            return (
+                self._kv.get(current_key),
+                list(self._lists.get(queue_key, [])),
+                self._kv.get(play_state_key),
+                int(self._kv.get(version_key, 0) or 0),
+            )
+
     def queue_clear(
         self, key: str, version_key: str, expected_version: int | None = None
     ) -> None:
@@ -421,6 +437,37 @@ class QueueManager:
         """获取队列列表"""
         items = self.redis.lrange(self._qkey(), start, end)
         return [json.loads(item) for item in items]
+
+    def get_queue_snapshot(self) -> dict:
+        """Atomically read queue contents and the version used by panel writes."""
+        r = self.redis
+        if hasattr(r, "queue_snapshot"):
+            current, pending, play_state, version = r.queue_snapshot(
+                self._qkey(), self._ckey(), self._pskey(), self._vkey()
+            )
+        else:
+            current, pending, play_state, version = r.eval(
+                """
+return {
+  redis.call('GET', KEYS[1]) or false,
+  redis.call('LRANGE', KEYS[2], 0, -1),
+  redis.call('GET', KEYS[3]) or false,
+  redis.call('GET', KEYS[4]) or '0'
+}
+""",
+                4,
+                self._ckey(),
+                self._qkey(),
+                self._pskey(),
+                self._vkey(),
+            )
+        return {
+            "current": json.loads(current) if current else None,
+            "pending": [json.loads(item) for item in pending],
+            "play_state": json.loads(play_state) if play_state else None,
+            "version": max(0, int(version or 0)),
+            "degraded": type(r).__name__ == "_InMemoryRedis",
+        }
 
     def get_queue_length(self) -> int:
         return self.redis.llen(self._qkey())

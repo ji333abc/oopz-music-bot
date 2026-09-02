@@ -268,8 +268,9 @@ export default function Home() {
   }, [applySnapshot, refresh]);
 
   useEffect(() => {
-    if (sseConnected) return;
-    refreshRef.current();
+    // SSE covers semantic notifications; the low-frequency snapshot also
+    // reconciles natural playback transitions and legacy queue writers.
+    if (!sseConnected) refreshRef.current();
     const timer = window.setInterval(() => refreshRef.current(), fallbackPollMs);
     return () => window.clearInterval(timer);
   }, [fallbackPollMs, sseConnected]);
@@ -403,7 +404,13 @@ export default function Home() {
       if (!response.ok || !result.ok) throw new Error(result.message || "队列排序失败");
       setToast(result.message || "队列顺序已更新");
     } catch (error) {
+      // A request can fail before we know whether the server committed it.
+      // Remove the optimistic order immediately; the periodic snapshot (and
+      // this prompt retry) then converges on the authoritative queue.
+      setQueue(original);
+      setQueueVersion(version);
       setToast(error instanceof Error ? error.message : "队列排序失败");
+      window.setTimeout(() => refreshRef.current(), 0);
     } finally {
       setQueueBusy(false);
     }

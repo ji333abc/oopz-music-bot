@@ -6,6 +6,7 @@ import unittest
 
 from oopzbot.config import Settings
 from oopzbot.controller import MusicController, MusicQueue
+from oopzbot.infrastructure.queue_adapter import LegacyQueueAdapter
 
 
 class _FakeRuntime:
@@ -120,6 +121,31 @@ class MusicQueueTests(unittest.TestCase):
         queue.add_to_queue(song)
         song["name"] = "changed"
         self.assertEqual(queue.peek_next()["name"], "one")
+
+    def test_adapter_uses_atomic_queue_snapshot(self) -> None:
+        queue = MusicQueue()
+        queue.add_to_queue({"name": "one", "song_id": "1"})
+        version = queue.get_version()
+        adapter = LegacyQueueAdapter(queue)
+
+        # Sequential reads would allow a mutation between list and version.
+        # Built-in queues must instead expose the one-lock snapshot path.
+        original_get_queue = queue.get_queue
+        original_get_version = queue.get_version
+        queue.get_queue = lambda: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            AssertionError("sequential queue read used")
+        )
+        queue.get_version = lambda: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            AssertionError("sequential version read used")
+        )
+        try:
+            snapshot = adapter.get_snapshot()
+        finally:
+            queue.get_queue = original_get_queue  # type: ignore[method-assign]
+            queue.get_version = original_get_version  # type: ignore[method-assign]
+
+        self.assertEqual(snapshot.version, version)
+        self.assertEqual([item.song.name for item in snapshot.pending], ["one"])
 
     def test_remove_positions_uses_one_based_pending_indexes(self) -> None:
         queue = MusicQueue()

@@ -65,11 +65,16 @@ async def panel_event_stream(
     yield encode_event("snapshot", initial, event_id=revision)
 
     while not await request.is_disconnected():
-        changed = await asyncio.to_thread(
-            publisher.wait_for_change,
-            revision,
-            float(heartbeat_seconds),
-        )
+        wait_async = getattr(publisher, "wait_for_change_async", None)
+        if callable(wait_async):
+            changed = await wait_async(revision, float(heartbeat_seconds))
+        else:
+            # Compatibility for injected publishers that predate the async API.
+            changed = await asyncio.to_thread(
+                publisher.wait_for_change,
+                revision,
+                float(heartbeat_seconds),
+            )
         if changed == -1:
             break
         if changed is None:

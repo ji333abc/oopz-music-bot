@@ -33,6 +33,17 @@ class MusicQueue:
         with self._lock:
             return [dict(item) for item in self._items]
 
+    def get_queue_snapshot(self) -> dict:
+        """Return queue state and its optimistic-lock version under one lock."""
+        with self._lock:
+            return {
+                "current": dict(self._current) if self._current else None,
+                "pending": [dict(item) for item in self._items],
+                "play_state": dict(self._play_state),
+                "version": self._version,
+                "degraded": False,
+            }
+
     def get_queue_length(self) -> int:
         with self._lock:
             return len(self._items)

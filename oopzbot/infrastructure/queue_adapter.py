@@ -34,21 +34,35 @@ class LegacyQueueAdapter:
 
     def get_snapshot(self) -> QueueSnapshot:
         with self._lock:
-            get_current = getattr(self._queue, "get_current", None)
-            current = get_current() if callable(get_current) else None
-            pending = self._queue.get_queue()
-            get_play_state = getattr(self._queue, "get_play_state", None)
-            play_state = get_play_state() if callable(get_play_state) else None
+            get_atomic_snapshot = getattr(self._queue, "get_queue_snapshot", None)
+            if callable(get_atomic_snapshot):
+                raw = get_atomic_snapshot()
+                current = raw.get("current")
+                pending = raw.get("pending") or []
+                play_state = raw.get("play_state")
+                version = int(raw.get("version") or 0)
+                degraded = bool(raw.get("degraded"))
+            else:
+                # Compatibility-only fallback for third-party queue managers.
+                # Built-in implementations expose get_queue_snapshot so their
+                # optimistic version always describes the returned list.
+                get_current = getattr(self._queue, "get_current", None)
+                current = get_current() if callable(get_current) else None
+                pending = self._queue.get_queue()
+                get_play_state = getattr(self._queue, "get_play_state", None)
+                play_state = get_play_state() if callable(get_play_state) else None
+                version = (
+                    int(self._queue.get_version())
+                    if callable(getattr(self._queue, "get_version", None))
+                    else 0
+                )
+                degraded = self.degraded
             return queue_snapshot_from_legacy(
                 current,
                 pending,
                 play_state,
-                degraded=self.degraded,
-                version=(
-                    int(self._queue.get_version())
-                    if callable(getattr(self._queue, "get_version", None))
-                    else 0
-                ),
+                degraded=degraded,
+                version=version,
             )
 
     def enqueue(self, item: QueueItem) -> int:

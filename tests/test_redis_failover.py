@@ -134,6 +134,29 @@ class RedisFailoverTests(unittest.TestCase):
         self.assertEqual(second.get_version(), version_b)
         self.assertEqual([item["song_id"] for item in second.get_queue()], ["b1"])
 
+    def test_memory_snapshot_reads_queue_and_version_atomically(self) -> None:
+        memory = queue_manager._InMemoryRedis()
+        manager = queue_manager.QueueManager("snapshot", redis_client=memory)
+        manager.add_to_queue({"song_id": "one"})
+        manager.add_to_queue({"song_id": "two"})
+        manager.set_current({"song_id": "current"})
+        manager.set_play_state({"playing": True})
+
+        with patch.object(
+            memory,
+            "lrange",
+            side_effect=AssertionError("snapshot must not use sequential reads"),
+        ):
+            snapshot = manager.get_queue_snapshot()
+
+        self.assertEqual(snapshot["version"], manager.get_version())
+        self.assertEqual(
+            [item["song_id"] for item in snapshot["pending"]],
+            ["one", "two"],
+        )
+        self.assertEqual(snapshot["current"]["song_id"], "current")
+        self.assertTrue(snapshot["play_state"]["playing"])
+
     def test_returning_song_to_front_advances_version(self) -> None:
         memory = queue_manager._InMemoryRedis()
         queue_manager._redis_client = memory

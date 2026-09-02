@@ -55,6 +55,8 @@ test("protects and renders the real-data control panel shell", async () => {
   assert.match(source, /fetch\("\/api\/state"/);
   assert.match(source, /queue\.map/);
   assert.match(source, /new EventSource\("\/api\/events"/);
+  assert.doesNotMatch(source, /if \(sseConnected\) return/);
+  assert.match(source, /setQueue\(original\)/);
   assert.match(source, /expected_version/);
   const sortable = await readFile(new URL("../components/QueueSortableList.tsx", import.meta.url), "utf8");
   assert.match(sortable, /PointerSensor/);
