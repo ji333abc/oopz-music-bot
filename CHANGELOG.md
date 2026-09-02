@@ -11,6 +11,40 @@
 - `oopzbot qqmusic-login` 的登录、状态、刷新和 Cookie 查询命令。
 - QQ Music API 内部 Cookie 热更新端点，以及 Compose/本地托管的分发与重启兜底。
 - Panel 和健康快照中的 QQ 音乐凭证状态（不含任何密钥）。
+- Panel SSE 实时状态通道，包含 snapshot、state、reset 和 heartbeat 事件，并保留低频完整快照校准。
+- 搜歌结果 TTL/LRU 缓存、同请求合并、负缓存和可配置容量上限；播放 URL 与认证失败不会进入缓存。
+- QQMusic 外部请求的 last/p50/p95、成功率、错误分类、可播放率，以及命令、播放和失败历史诊断。
+- 待播队列的鼠标、触摸和键盘拖拽排序，以及基于 `queue_version` 的乐观并发控制。
+- 独立 `jm-worker` 镜像和 Compose `jm` Profile，通过 Redis 队列、租约续期和结果栅栏隔离长任务。
+- `oopzctl` 诊断、依赖清单、备份校验、安全升级、自动回滚和回滚点清理入口。
+
+### Changed
+
+- Panel 状态同步由高频完整轮询改为 SSE 语义通知加默认 60 秒校准，显著减少空闲快照请求。
+- Panel 状态文件升级到 schema 2；所有历史、指标和状态均有固定容量及 512 KiB 文件上限。
+- Bot 默认 `core` 镜像不再包含 JM Python/npm 依赖、Node 上传器或任务执行路径。
+- 旧 Web 播放器和管理后台的队列写入统一经过版本化 `QueueManager`。
+
+### Fixed
+
+- 队列内容与 `queue_version` 现在通过共享锁或 Redis Lua 原子读取，避免并发自动切歌时删除或移动错误歌曲。
+- 拖拽排序请求发生网络或响应解析错误时会撤销乐观顺序并重新同步服务端状态。
+- SSE 在线时仍执行低频校准，自然切歌、旧 Web 写入和 worker 心跳变化不会使面板长期停留在旧状态。
+- SSE 等待改为异步通知，不再由每个连接长期占用命令和就绪探测共享的默认线程池。
+
+### Security
+
+- 新增的状态、诊断和历史数据在写盘及导出前统一限制容量并脱敏 URL、Cookie、Token 和用户标识。
+- JM worker 只接收 QQ App、Redis 和任务限制配置，不接收 OOPZ、QQMusic Cookie 或 Panel 密钥。
+
+### Upgrade notes
+
+- 当前候选分支：`codex/p2-performance-panel`；修复后提交：`a3a312b`。
+- 升级前确保服务器工作树干净、`.env` 已配置 `QQBOT_BRIDGE_TOKEN` 和 `OOPZ_PANEL_PASSWORD`，并至少保留 1 GiB 可用磁盘。
+- 默认部署先执行 `./oopzctl upgrade --ref codex/p2-performance-panel --dry-run`，确认后执行同一命令并移除 `--dry-run`。
+- 启用 JM 时必须设置 `QQBOT_JM_ENABLED=true`，并在两条升级命令中同时添加 `--profile jm`。
+- 升级工具会在切换前创建并校验 data/Redis 备份；健康检查失败时恢复旧提交和旧镜像，不自动覆盖数据。
+- 回滚使用 `./oopzctl rollback --release <RELEASE_ID>`；只有明确需要恢复数据时才运行带 `--confirm` 的 restore。
 
 ## [0.1.1] - 2026-08-28
 
