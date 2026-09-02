@@ -32,7 +32,10 @@ def redis_client():
         password=os.getenv("BOT_REDIS_PASSWORD") or None,
         decode_responses=True,
         socket_connect_timeout=3,
-        socket_timeout=5,
+        # Keep the client read timeout comfortably above claim()'s blocking
+        # Redis poll.  Equal timeouts race when the queue is idle and can make
+        # an otherwise healthy worker exit with redis.exceptions.TimeoutError.
+        socket_timeout=10,
     )
 
 

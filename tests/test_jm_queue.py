@@ -1,10 +1,19 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 import unittest
+from unittest.mock import patch
 
 from oopzbot.jm.contracts import JMJob
-from oopzbot.jm.queue import HEARTBEAT_KEY, PROCESSING_KEY, QUEUE_KEY, RedisJMQueue
+from oopzbot.jm.queue import (
+    HEARTBEAT_KEY,
+    PROCESSING_KEY,
+    QUEUE_KEY,
+    RedisJMQueue,
+    redis_client,
+)
 
 
 class _Pipeline:
@@ -165,6 +174,17 @@ class JMQueueTests(unittest.TestCase):
 
         self.assertEqual(first_claim.job.album_id, "123")
         self.assertEqual(second_claim.job.album_id, "456")
+
+    def test_client_read_timeout_exceeds_blocking_claim_timeout(self) -> None:
+        captured = {}
+        fake_redis = types.SimpleNamespace(
+            Redis=lambda **kwargs: captured.update(kwargs) or object()
+        )
+
+        with patch.dict(sys.modules, {"redis": fake_redis}):
+            redis_client()
+
+        self.assertGreater(float(captured["socket_timeout"]), 5.0)
 
 
 if __name__ == "__main__":

@@ -32,6 +32,7 @@
 - SSE 在线时仍执行低频校准，自然切歌、旧 Web 写入和 worker 心跳变化不会使面板长期停留在旧状态。
 - SSE 等待改为异步通知，不再由每个连接长期占用命令和就绪探测共享的默认线程池。
 - Linux 仓库入口 `oopzctl` 现在带可执行权限，可直接按部署文档使用 `./oopzctl`。
+- JM worker 的 Redis 读取超时现在长于阻塞取任务周期，空队列时不会因超时竞争反复退出重启。
 
 ### Security
 
@@ -40,7 +41,7 @@
 
 ### Upgrade notes
 
-- 当前候选分支：`codex/p2-performance-panel`；修复后提交：`a3a312b`。
+- 当前候选分支：`codex/p2-performance-panel`；部署时以远程分支最新提交为准。
 - 升级前确保服务器工作树干净、`.env` 已配置 `QQBOT_BRIDGE_TOKEN` 和 `OOPZ_PANEL_PASSWORD`，并至少保留 1 GiB 可用磁盘。
 - 默认部署先执行 `./oopzctl upgrade --ref codex/p2-performance-panel --dry-run`，确认后执行同一命令并移除 `--dry-run`。
 - 启用 JM 时必须设置 `QQBOT_JM_ENABLED=true`，并在两条升级命令中同时添加 `--profile jm`。
