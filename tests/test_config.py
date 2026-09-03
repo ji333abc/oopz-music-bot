@@ -157,6 +157,33 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.search_cache_ttl_seconds, 60)
         self.assertEqual(settings.search_cache_max_entries, 256)
 
+    def test_album_request_settings_parse_and_are_bounded(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "OOPZ_ALBUM_REQUEST_ENABLED": "true",
+                "OOPZ_ALBUM_REQUEST_MAX_TRACKS": "50",
+                "OOPZ_ALBUM_REQUEST_SESSION_TTL_SECONDS": "600",
+            },
+            clear=True,
+        ):
+            settings = Settings.from_env()
+        self.assertTrue(settings.album_request_enabled)
+        self.assertEqual(settings.album_request_max_tracks, 50)
+        self.assertEqual(settings.album_request_session_ttl_seconds, 600)
+
+        with patch.dict(
+            os.environ,
+            {
+                "OOPZ_ALBUM_REQUEST_MAX_TRACKS": "0",
+                "OOPZ_ALBUM_REQUEST_SESSION_TTL_SECONDS": "9999",
+            },
+            clear=True,
+        ):
+            settings = Settings.from_env()
+        self.assertEqual(settings.album_request_max_tracks, 30)
+        self.assertEqual(settings.album_request_session_ttl_seconds, 300)
+
     def test_panel_sse_settings_are_bounded(self) -> None:
         with patch.dict(
             os.environ,

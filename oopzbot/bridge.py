@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
 from threading import Lock
@@ -35,7 +36,7 @@ from .domain.compat import (
     display_song_from_legacy,
     queue_item_to_legacy,
 )
-from .domain.contracts import CommandRequest, PlaybackState
+from .domain.contracts import CommandRequest, PlaybackState, QueueItem, SongCandidate
 from .http.routes import create_bridge_router
 from .infrastructure.queue_adapter import LegacyQueueAdapter
 from .metrics import CommandTiming, FailureRecord, PlaybackHistoryItem, metrics, utc_now
@@ -46,12 +47,14 @@ from .state_publisher import state_publisher
 
 logger = logging.getLogger("QQBotBridge")
 _music_dependency = None
+_album_provider_dependency = None
 
 _command_lock = Lock()
 _SEARCH_SESSION_TTL_SECONDS = 300
 _RANK_SESSION_TTL_SECONDS = 300
 _search_sessions = ExpiringSessionStore(_SEARCH_SESSION_TTL_SECONDS)
 _rank_sessions = ExpiringSessionStore(_RANK_SESSION_TTL_SECONDS)
+_album_sessions = ExpiringSessionStore(_SEARCH_SESSION_TTL_SECONDS)
 
 
 def _record_diagnostic(recorder, value) -> None:
@@ -109,6 +112,13 @@ _HELP_MESSAGE = """Music-bot 使用帮助
 ├─ 榜单 <ID或名称>
 ├─ 榜单点歌 <编号>
 └─ 榜单批量 10 —— 前10首加入队列
+
+💿 专辑点歌（需启用）
+├─ 专辑 <专辑名>
+├─ 专辑选择 <编号>
+├─ 专辑点歌 <曲目编号>
+├─ 专辑加入 全部 / 前N首 / N-M
+└─ 取消专辑
 
 👥 OOPZ频道
 ├─ 在线 —— 显示所有语音频道及成员
@@ -540,6 +550,28 @@ def _music_handler():
 def set_music_handler(handler) -> None:
     global _music_dependency
     _music_dependency = handler
+
+
+def set_album_provider(provider) -> None:
+    """Inject an album provider for tests or an alternative QQ Music backend."""
+    global _album_provider_dependency
+    _album_provider_dependency = provider
+
+
+def _album_provider(music):
+    global _album_provider_dependency
+    if _album_provider_dependency is not None:
+        return _album_provider_dependency
+    candidate = getattr(music, "platforms", {}).get("qq")
+    if candidate and all(
+        callable(getattr(candidate, name, None))
+        for name in ("search_albums", "get_album")
+    ):
+        return candidate
+    from .music import QQMusic
+
+    _album_provider_dependency = QQMusic(get_settings())
+    return _album_provider_dependency
 
 
 def _command_config(request: CommandRequest | None = None) -> tuple[str, str, str, str]:
@@ -1098,6 +1130,301 @@ def _select_song(
     }
 
 
+def _album_payload(album: dict, index: int | None = None) -> dict:
+    payload = {
+        "id": str(album.get("id") or album.get("mid") or ""),
+        "name": str(album.get("name") or "未知专辑"),
+        "artists": str(album.get("artists") or "未知歌手"),
+        "cover": str(album.get("cover") or ""),
+        "release_date": str(album.get("release_date") or ""),
+        "track_count": int(album.get("track_count") or 0),
+    }
+    if index is not None:
+        payload["index"] = index
+    return payload
+
+
+def _album_enabled() -> bool:
+    return bool(get_settings().album_request_enabled)
+
+
+def _search_albums(music, keyword: str, requester_key: str) -> dict:
+    if not keyword:
+        return {"ok": False, "message": "请输入专辑名，例如：专辑 叶惠美"}
+    if len(keyword) > 100:
+        return {"ok": False, "message": "专辑关键词过长"}
+    provider = _album_provider(music)
+    try:
+        albums = list(provider.search_albums(keyword, limit=5))
+    except Exception as exc:
+        logger.warning("QQ音乐专辑搜索失败: %s", exc)
+        albums = []
+    if not albums:
+        return {"ok": False, "message": f"QQ音乐未找到专辑：{keyword}"}
+    settings = get_settings()
+    _album_sessions.ttl_seconds = settings.album_request_session_ttl_seconds
+    _album_sessions.put(requester_key, albums=albums[:5], keyword=keyword)
+    lines = [f"专辑搜索：{keyword}"]
+    lines.extend(
+        f"{index}. {album.get('name', '未知专辑')} - "
+        f"{album.get('artists', '未知歌手')}"
+        for index, album in enumerate(albums[:5], 1)
+    )
+    lines.append("5分钟内发送：专辑选择 <编号>")
+    return {
+        "ok": True,
+        "reply_type": "album_search_results",
+        "message": "\n".join(lines),
+        "albums": [
+            _album_payload(album, index)
+            for index, album in enumerate(albums[:5], 1)
+        ],
+    }
+
+
+def _album_detail_result(session: dict, page: int = 1) -> dict:
+    album = session.get("album") or {}
+    tracks = list(session.get("tracks") or [])
+    per_page = 10
+    total_pages = max(1, (len(tracks) + per_page - 1) // per_page)
+    page = max(1, min(int(page), total_pages))
+    start = (page - 1) * per_page
+    visible = tracks[start : start + per_page]
+    lines = [
+        f"{album.get('name', '未知专辑')} - {album.get('artists', '未知歌手')}",
+        f"曲目 {len(tracks)} 首 · 第 {page}/{total_pages} 页",
+    ]
+    lines.extend(
+        f"{index}. {song.get('name', '未知歌曲')} - "
+        f"{song.get('artists', '未知歌手')}"
+        for index, song in enumerate(visible, start + 1)
+    )
+    lines.append("发送：专辑点歌 <编号>，或 专辑加入 全部/前N首/N-M")
+    return {
+        "ok": True,
+        "reply_type": "album_detail",
+        "message": "\n".join(lines),
+        "album": _album_payload(album),
+        "tracks": [
+            _qq_song_payload(song, index)
+            for index, song in enumerate(visible, start + 1)
+        ],
+        "page": page,
+        "total_pages": total_pages,
+    }
+
+
+def _select_album(music, index: int, requester_key: str) -> dict:
+    session = _album_sessions.get_active(requester_key)
+    if not session or not session.get("albums"):
+        return {"ok": False, "message": "专辑搜索结果已失效，请重新发送：专辑 <专辑名>"}
+    albums = list(session.get("albums") or [])
+    if index < 1 or index > len(albums):
+        return {"ok": False, "message": f"编号无效，请输入 1-{len(albums)}"}
+    provider = _album_provider(music)
+    selected = albums[index - 1]
+    album_id = str(selected.get("id") or selected.get("mid") or "")
+    try:
+        album = provider.get_album(album_id)
+    except Exception as exc:
+        logger.warning("QQ音乐专辑详情读取失败: %s", exc)
+        album = None
+    if not album:
+        return {"ok": False, "message": "暂时无法读取该专辑曲目，请稍后重试"}
+    normalized = {**selected, **album}
+    tracks = [dict(song, platform="qq") for song in (album.get("tracks") or [])]
+    if not tracks:
+        return {"ok": False, "message": "该专辑没有可用曲目"}
+    _album_sessions.put(
+        requester_key,
+        albums=albums,
+        album=normalized,
+        tracks=tracks,
+        keyword=session.get("keyword", ""),
+    )
+    return _album_detail_result(_album_sessions.get_active(requester_key) or {})
+
+
+def _album_tracks_page(requester_key: str, page: int) -> dict:
+    session = _album_sessions.get_active(requester_key)
+    if not session or not session.get("tracks"):
+        return {"ok": False, "message": "尚未选择专辑，请先发送：专辑 <专辑名>"}
+    return _album_detail_result(session, page)
+
+
+def _ensure_album_voice(music, area: str, voice_channel: str) -> dict | None:
+    if (
+        getattr(music, "_voice_channel_id", None) == voice_channel
+        and getattr(music, "_voice_channel_area", None) == area
+    ):
+        return None
+    result = music.enter_voice_channel(voice_channel, area)
+    if not isinstance(result, dict) or result.get("error"):
+        detail = result.get("error") if isinstance(result, dict) else "unknown"
+        return {"ok": False, "message": f"进入 Oopz 语音频道失败: {detail}"}
+    return None
+
+
+def _play_album_track(
+    music,
+    index: int,
+    requester_key: str,
+    area: str,
+    text_channel: str,
+    voice_channel: str,
+    bot_user: str,
+) -> dict:
+    session = _album_sessions.get_active(requester_key)
+    if not session or not session.get("tracks"):
+        return {"ok": False, "message": "尚未选择专辑，请先发送：专辑 <专辑名>"}
+    tracks = list(session.get("tracks") or [])
+    if index < 1 or index > len(tracks):
+        return {"ok": False, "message": f"曲目编号无效，请输入 1-{len(tracks)}"}
+    if voice_error := _ensure_album_voice(music, area, voice_channel):
+        return voice_error
+    song = tracks[index - 1]
+    result = _playback_service(music).play_choice(
+        song,
+        channel=text_channel,
+        area=area,
+        requester_id=bot_user,
+    )
+    if not result.ok:
+        return {"ok": False, "message": result.message}
+    _album_sessions.pop(requester_key, None)
+    return {
+        "ok": True,
+        "reply_type": "album_song_selected",
+        "message": f"已选择：{song.get('name', '未知歌曲')} - {song.get('artists', '未知歌手')}",
+        "song": _qq_song_payload(song),
+    }
+
+
+def _album_track_slice(tracks: list[dict], selection: str) -> list[dict] | None:
+    value = re.sub(r"\s+", "", selection)
+    if value in {"全部", "整张", "全选"}:
+        return tracks
+    front = re.fullmatch(r"前(\d+)首?", value)
+    if front:
+        return tracks[: int(front.group(1))]
+    span = re.fullmatch(r"(\d+)(?:-|~|～|至|—)(\d+)", value)
+    if span:
+        start, end = int(span.group(1)), int(span.group(2))
+        if start < 1 or end < start or end > len(tracks):
+            return None
+        return tracks[start - 1 : end]
+    return None
+
+
+def _album_queue_item(
+    song: dict,
+    *,
+    album: dict,
+    track_number: int,
+    batch_id: str,
+    area: str,
+    channel: str,
+    requester_id: str,
+) -> QueueItem:
+    duration_ms = int(song.get("duration_ms") or song.get("duration") or 0)
+    candidate = SongCandidate(
+        song_id=str(song.get("id") or song.get("mid") or song.get("song_id") or ""),
+        name=str(song.get("name") or "未知歌曲"),
+        artists=str(song.get("artists") or "未知歌手"),
+        album=str(song.get("album") or album.get("name") or ""),
+        duration_ms=duration_ms,
+        duration_text=str(song.get("durationText") or ""),
+        cover=str(song.get("cover") or album.get("cover") or ""),
+        platform="qq",
+        url="",
+    )
+    return QueueItem(
+        song=candidate,
+        channel=channel,
+        area=area,
+        requester_id=requester_id,
+        extras={
+            "batch_id": batch_id,
+            "album_id": str(album.get("id") or album.get("mid") or ""),
+            "album_track_number": track_number,
+        },
+    )
+
+
+def _queue_album_tracks(
+    music,
+    selection: str,
+    requester_key: str,
+    area: str,
+    text_channel: str,
+    voice_channel: str,
+    bot_user: str,
+    expected_version: int | None = None,
+) -> dict:
+    session = _album_sessions.get_active(requester_key)
+    if not session or not session.get("tracks"):
+        return {"ok": False, "message": "尚未选择专辑，请先发送：专辑 <专辑名>"}
+    all_tracks = list(session.get("tracks") or [])
+    chosen = _album_track_slice(all_tracks, selection)
+    if chosen is None or not chosen:
+        return {
+            "ok": False,
+            "message": f"范围无效，请使用“全部”“前N首”或“1-{len(all_tracks)}”",
+        }
+    maximum = get_settings().album_request_max_tracks
+    if len(chosen) > maximum:
+        return {"ok": False, "message": f"单次最多加入 {maximum} 首，请缩小范围"}
+    if voice_error := _ensure_album_voice(music, area, voice_channel):
+        return voice_error
+
+    album = session.get("album") or {}
+    positions = {id(song): index for index, song in enumerate(all_tracks, 1)}
+    batch_id = str(uuid.uuid4())
+    items = [
+        _album_queue_item(
+            song,
+            album=album,
+            track_number=positions[id(song)],
+            batch_id=batch_id,
+            area=area,
+            channel=text_channel,
+            requester_id=bot_user,
+        )
+        for song in chosen
+    ]
+    queue = _queue_service(music, area)
+    before = queue.snapshot()
+    try:
+        queue.enqueue_many(items, expected_version)
+    except QueueConflictError as exc:
+        return {
+            "ok": False,
+            "code": "queue_conflict",
+            "message": "队列已被其他操作更新，请刷新后重试",
+            "expected_version": expected_version,
+            "actual_version": exc.actual_version,
+        }
+    if before.current is None:
+        _playback_service(music).next(
+            channel=text_channel,
+            area=area,
+            requester_id=bot_user,
+        )
+    after = queue.snapshot()
+    _album_sessions.pop(requester_key, None)
+    return {
+        "ok": True,
+        "reply_type": "album_batch_queued",
+        "message": (
+            f"已加入《{album.get('name', '未知专辑')}》{len(items)} 首；"
+            f"当前待播 {after.queue_length} 首"
+        ),
+        "added_count": len(items),
+        "batch_id": batch_id,
+        "queue_version": after.version,
+    }
+
+
 def _execute_command_impl(request: CommandRequest) -> dict:
     with _command_lock:
         command = request.command
@@ -1210,6 +1537,59 @@ def _execute_command_impl(request: CommandRequest) -> dict:
                 "ok": False,
                 "message": "未找到该榜单，请发送“排行榜”查看可用榜单",
             }
+
+        album_command = command in {"专辑", "取消专辑"} or command.startswith(
+            ("专辑 ", "专辑选择", "选专辑", "专辑曲目", "专辑点歌", "专辑加入")
+        )
+        if album_command and not _album_enabled():
+            return {"ok": False, "message": "专辑点歌模式尚未启用"}
+
+        if command == "取消专辑":
+            removed = _album_sessions.pop(requester_key, None)
+            return {
+                "ok": True,
+                "message": "已取消当前专辑选择" if removed else "当前没有待处理的专辑选择",
+            }
+
+        if command == "专辑":
+            return {"ok": False, "message": "请输入专辑名，例如：专辑 叶惠美"}
+
+        album_selection = re.fullmatch(r"(?:专辑选择|选专辑)\s*(\d+)", command)
+        if album_selection:
+            return _select_album(music, int(album_selection.group(1)), requester_key)
+
+        album_page = re.fullmatch(r"专辑曲目(?:\s+(\d+))?", command)
+        if album_page:
+            return _album_tracks_page(requester_key, int(album_page.group(1) or 1))
+
+        album_song = re.fullmatch(r"专辑点歌\s*(\d+)", command)
+        if album_song:
+            return _play_album_track(
+                music,
+                int(album_song.group(1)),
+                requester_key,
+                area,
+                text_channel,
+                voice_channel,
+                music_requester,
+            )
+
+        album_batch = re.fullmatch(r"专辑加入\s+(.+)", command)
+        if album_batch:
+            return _queue_album_tracks(
+                music,
+                album_batch.group(1),
+                requester_key,
+                area,
+                text_channel,
+                voice_channel,
+                music_requester,
+                request.expected_version,
+            )
+
+        album_query = re.fullmatch(r"专辑\s+(.+)", command)
+        if album_query:
+            return _search_albums(music, album_query.group(1).strip(), requester_key)
 
         search_value = _search_keyword(command)
         if matches_search_command(command):
@@ -1611,6 +1991,8 @@ def _command_event(command: str, result: dict, source: str) -> None:
         "选歌",
         "榜单点歌",
         "榜单批量",
+        "专辑点歌",
+        "专辑加入",
         "删除",
         "移除",
         "暂停",

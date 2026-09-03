@@ -134,6 +134,27 @@ class RedisFailoverTests(unittest.TestCase):
         self.assertEqual(second.get_version(), version_b)
         self.assertEqual([item["song_id"] for item in second.get_queue()], ["b1"])
 
+    def test_memory_batch_append_advances_one_version_and_rejects_stale_write(self) -> None:
+        memory = queue_manager._InMemoryRedis()
+        manager = queue_manager.QueueManager("album", redis_client=memory)
+        version = manager.get_version()
+
+        length = manager.add_many_to_queue(
+            [{"song_id": "one"}, {"song_id": "two"}],
+            expected_version=version,
+        )
+
+        self.assertEqual(length, 2)
+        self.assertEqual(manager.get_version(), version + 1)
+        with self.assertRaisesRegex(RuntimeError, "version conflict"):
+            manager.add_many_to_queue(
+                [{"song_id": "three"}], expected_version=version
+            )
+        self.assertEqual(
+            [item["song_id"] for item in manager.get_queue()],
+            ["one", "two"],
+        )
+
     def test_memory_snapshot_reads_queue_and_version_atomically(self) -> None:
         memory = queue_manager._InMemoryRedis()
         manager = queue_manager.QueueManager("snapshot", redis_client=memory)

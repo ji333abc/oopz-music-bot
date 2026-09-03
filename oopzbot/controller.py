@@ -29,6 +29,21 @@ class MusicQueue:
             self._version += 1
             return len(self._items)
 
+    def add_many_to_queue(
+        self,
+        items: list[dict],
+        expected_version: int | None = None,
+    ) -> int:
+        """Atomically append a batch and advance the queue version once."""
+        with self._lock:
+            if expected_version is not None and expected_version != self._version:
+                raise RuntimeError("queue version conflict")
+            if not items:
+                return len(self._items)
+            self._items.extend(dict(item) for item in items)
+            self._version += 1
+            return len(self._items)
+
     def get_queue(self) -> list[dict]:
         with self._lock:
             return [dict(item) for item in self._items]
@@ -277,6 +292,22 @@ class MusicController:
             playable, platform_name, str(song_id), channel, area, user
         )
 
+    def _resolve_queued_song(
+        self,
+        song: dict,
+        channel: str,
+        area: str,
+        user: str,
+    ) -> dict:
+        if song.get("url"):
+            return dict(song, channel=channel, area=area, user=user or song.get("user", ""))
+        platform = str(song.get("platform") or "qq")
+        resolved = self._resolve_playable(song, platform, channel, area, user)
+        for key in ("batch_id", "album_id", "album_track_number"):
+            if key in song:
+                resolved[key] = song[key]
+        return resolved
+
     def play_song(self, keyword: str, platform: str, channel: str, area: str, user: str) -> dict:
         results = self.search_candidates(keyword, platform, limit=1)
         if not results:
@@ -374,7 +405,6 @@ class MusicController:
             )
 
     def play_next(self, channel: str, area: str, user: str = "") -> dict:
-        del user
         queue = self._get_queue(area)
         with self._playback_lock:
             self._play_generation += 1
@@ -385,16 +415,32 @@ class MusicController:
                 logger.debug("停止当前音频失败", exc_info=True)
             queue.clear_current()
             queue.clear_play_state()
-            next_song = queue.play_next()
+            skipped: list[str] = []
+            next_song = None
+            while queued := queue.play_next():
+                try:
+                    next_song = self._resolve_queued_song(
+                        queued, channel, area, user
+                    )
+                    break
+                except (KeyError, RuntimeError) as exc:
+                    skipped.append(str(queued.get("name") or "未知歌曲"))
+                    logger.warning("跳过不可播放的队列歌曲 %s: %s", skipped[-1], exc)
             if not next_song:
-                return {"code": "success", "message": "队列已空"}
+                message = "队列已空"
+                if skipped:
+                    message = f"队列中的 {len(skipped)} 首歌曲暂不可播放，已跳过"
+                return {"code": "success", "message": message}
             self._start_song(next_song, queue)
             self.notify_message(
                 text=f"正在播放：{next_song['name']} - {next_song['artists']}",
                 channel=channel,
                 area=area,
             )
-            return {"code": "success", "message": "已切换到下一首"}
+            message = "已切换到下一首"
+            if skipped:
+                message += f"（已跳过 {len(skipped)} 首不可播放歌曲）"
+            return {"code": "success", "message": message}
 
     def stop_play(self, channel: str, area: str) -> dict:
         del channel

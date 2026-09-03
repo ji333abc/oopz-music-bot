@@ -33,6 +33,21 @@ class QueueService:
     def enqueue(self, item: QueueItem) -> int:
         return self._queue.enqueue(item)
 
+    def enqueue_many(
+        self,
+        items: Sequence[QueueItem],
+        expected_version: int | None = None,
+    ) -> int:
+        batch = tuple(items)
+        if not batch:
+            return self.snapshot().queue_length
+        try:
+            return self._queue.enqueue_many(batch, expected_version)
+        except RuntimeError as exc:
+            if "version conflict" in str(exc):
+                raise QueueConflictError(self.snapshot().version) from exc
+            raise
+
     def next_item(self) -> QueueItem | None:
         return self._queue.next_item()
 

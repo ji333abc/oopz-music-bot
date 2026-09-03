@@ -72,6 +72,31 @@ class LegacyQueueAdapter:
             # Reading length gives this port one stable one-based contract.
             return int(self._queue.get_queue_length())
 
+    def enqueue_many(
+        self,
+        items: Sequence[QueueItem],
+        expected_version: int | None = None,
+    ) -> int:
+        with self._lock:
+            encoded = [queue_item_to_legacy(item) for item in items]
+            if not encoded:
+                return int(self._queue.get_queue_length())
+            add_many = getattr(self._queue, "add_many_to_queue", None)
+            if callable(add_many):
+                return int(add_many(encoded, expected_version))
+
+            if expected_version is not None:
+                current = (
+                    int(self._queue.get_version())
+                    if callable(getattr(self._queue, "get_version", None))
+                    else 0
+                )
+                if current != expected_version:
+                    raise RuntimeError("queue version conflict")
+            for item in encoded:
+                self._queue.add_to_queue(item)
+            return int(self._queue.get_queue_length())
+
     def next_item(self) -> QueueItem | None:
         with self._lock:
             raw = self._queue.play_next()

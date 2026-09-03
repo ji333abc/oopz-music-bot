@@ -74,6 +74,59 @@ class QQMusicSearchTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0], "/getSearchByKey")
 
+    def test_album_search_uses_smartbox_album_results(self):
+        client, calls = self._client_with_response(
+            {
+                "data": {
+                    "album": {
+                        "itemlist": [
+                            {
+                                "mid": "album-mid",
+                                "name": "叶惠美",
+                                "singer": "周杰伦",
+                                "pic": "https://cover.invalid/album.jpg",
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+
+        albums = client.search_albums("叶惠美")
+
+        self.assertEqual(albums[0]["id"], "album-mid")
+        self.assertEqual(albums[0]["artists"], "周杰伦")
+        self.assertEqual(calls, [("/getSmartbox", {"key": "叶惠美"})])
+
+    def test_album_detail_normalizes_tracks_without_play_urls(self):
+        client, calls = self._client_with_response(
+            {
+                "data": {
+                    "mid": "album-mid",
+                    "name": "叶惠美",
+                    "singername": "周杰伦",
+                    "aDate": "2003-07-31",
+                    "list": [
+                        {
+                            "songmid": "track-mid",
+                            "songname": "以父之名",
+                            "singer": [{"name": "周杰伦"}],
+                            "album": {"name": "叶惠美", "mid": "album-mid"},
+                            "interval": 342,
+                        }
+                    ],
+                }
+            }
+        )
+
+        album = client.get_album("album-mid")
+
+        self.assertEqual(album["track_count"], 1)
+        self.assertEqual(album["tracks"][0]["mid"], "track-mid")
+        self.assertEqual(album["tracks"][0]["album_mid"], "album-mid")
+        self.assertNotIn("url", album["tracks"][0])
+        self.assertEqual(calls[0][0], "/getAlbumInfo")
+
 
 class QQMusicPlaybackTests(unittest.TestCase):
     def test_playback_falls_back_to_128_without_obsolete_route(self):

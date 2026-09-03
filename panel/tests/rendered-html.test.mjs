@@ -39,7 +39,8 @@ test("protects and renders the real-data control panel shell", async () => {
   assert.match(html, /id="section-members"/);
   assert.match(html, /id="section-jm"/);
   assert.match(html, /id="song-search"/);
-  assert.match(html, /搜索前 10 首/);
+  assert.match(html, /搜索歌曲/);
+  assert.match(html, /搜索专辑/);
   assert.match(html, /直接点歌/);
   assert.match(html, /真实事件记录/);
   assert.match(html, /性能与故障诊断/);
@@ -58,6 +59,8 @@ test("protects and renders the real-data control panel shell", async () => {
   assert.doesNotMatch(source, /if \(sseConnected\) return/);
   assert.match(source, /setQueue\(original\)/);
   assert.match(source, /expected_version/);
+  assert.match(source, /专辑加入/);
+  assert.match(source, /按范围加入/);
   const sortable = await readFile(new URL("../components/QueueSortableList.tsx", import.meta.url), "utf8");
   assert.match(sortable, /PointerSensor/);
   assert.match(sortable, /TouchSensor/);

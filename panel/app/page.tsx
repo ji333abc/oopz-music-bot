@@ -5,6 +5,15 @@ import QueueSortableList, { type QueueSong } from "../components/QueueSortableLi
 
 type PanelSection = "overview" | "music" | "queue" | "members" | "jm";
 type Song = QueueSong;
+type Album = {
+  id?: string;
+  index?: number;
+  name?: string;
+  artists?: string;
+  cover?: string;
+  release_date?: string;
+  track_count?: number;
+};
 type Playback = Song & {
   playing: boolean;
   paused: boolean;
@@ -54,6 +63,11 @@ type CommandResult = {
   queue_all?: Song[];
   queue_version?: number;
   code?: string;
+  albums?: Album[];
+  album?: Album;
+  tracks?: Song[];
+  page?: number;
+  total_pages?: number;
 };
 type ResourceMetric = { total: number; used: number; free: number; percent: number };
 type Infrastructure = {
@@ -178,6 +192,13 @@ export default function Home() {
   const [songQuery, setSongQuery] = useState("");
   const [songResults, setSongResults] = useState<Song[]>([]);
   const [songAction, setSongAction] = useState("");
+  const [albumResults, setAlbumResults] = useState<Album[]>([]);
+  const [selectedAlbum, setSelectedAlbum] = useState<Album | null>(null);
+  const [albumTracks, setAlbumTracks] = useState<Song[]>([]);
+  const [albumPage, setAlbumPage] = useState(1);
+  const [albumTotalPages, setAlbumTotalPages] = useState(1);
+  const [albumAction, setAlbumAction] = useState("");
+  const [albumRange, setAlbumRange] = useState("全部");
   const [queueRemoving, setQueueRemoving] = useState<number | null>(null);
   const [toast, setToast] = useState("");
   const [infrastructure, setInfrastructure] = useState<Infrastructure | null>(null);
@@ -459,6 +480,65 @@ export default function Home() {
     setSongAction("");
   };
 
+  const searchAlbums = async () => {
+    const keyword = songQuery.trim();
+    if (!keyword) return setToast("请输入专辑名或歌手");
+    setAlbumAction("search");
+    const result = await sendCommand(`专辑 ${keyword}`);
+    setAlbumResults(Array.isArray(result?.albums) ? result.albums : []);
+    setSelectedAlbum(null);
+    setAlbumTracks([]);
+    setAlbumAction("");
+  };
+
+  const selectAlbum = async (album: Album, fallbackIndex: number) => {
+    const index = Number(album.index) || fallbackIndex + 1;
+    setAlbumAction(`select-${index}`);
+    const result = await sendCommand(`专辑选择 ${index}`);
+    if (result?.ok) {
+      setSelectedAlbum(result.album || album);
+      setAlbumTracks(Array.isArray(result.tracks) ? result.tracks : []);
+      setAlbumPage(Number(result.page) || 1);
+      setAlbumTotalPages(Number(result.total_pages) || 1);
+    }
+    setAlbumAction("");
+  };
+
+  const showAlbumPage = async (page: number) => {
+    setAlbumAction(`page-${page}`);
+    const result = await sendCommand(`专辑曲目 ${page}`);
+    if (result?.ok) {
+      setAlbumTracks(Array.isArray(result.tracks) ? result.tracks : []);
+      setAlbumPage(Number(result.page) || page);
+      setAlbumTotalPages(Number(result.total_pages) || 1);
+    }
+    setAlbumAction("");
+  };
+
+  const playAlbumTrack = async (song: Song, fallbackIndex: number) => {
+    const index = Number(song.index) || fallbackIndex + 1;
+    setAlbumAction(`track-${index}`);
+    const result = await sendCommand(`专辑点歌 ${index}`);
+    if (result?.ok) {
+      setAlbumResults([]);
+      setSelectedAlbum(null);
+      setAlbumTracks([]);
+    }
+    setAlbumAction("");
+  };
+
+  const queueAlbum = async (selection: string) => {
+    setAlbumAction("queue");
+    const result = await sendCommand(`专辑加入 ${selection}`, queueVersion);
+    if (result?.ok) {
+      setAlbumResults([]);
+      setSelectedAlbum(null);
+      setAlbumTracks([]);
+      setAlbumRange("全部");
+    }
+    setAlbumAction("");
+  };
+
   const navigateTo = (section: PanelSection) => {
     setActiveSection(section);
     const target = document.getElementById(`section-${section}`);
@@ -526,8 +606,10 @@ export default function Home() {
               <div className="panel-heading"><div>待播队列 <em>{queue.length}</em></div><div><button className="text-button" onClick={refresh}>同步队列</button><button className="text-button" onClick={clearQueue} disabled={!queue.length || queueBusy}>清空队列</button></div></div>
               <form className="song-picker" onSubmit={searchSongs}>
                 <label htmlFor="song-search">添加歌曲（每个浏览器会话独立保留搜索结果）</label>
-                <div className="song-search-row"><input id="song-search" value={songQuery} onChange={(event) => setSongQuery(event.target.value)} placeholder="输入歌曲名或歌手" maxLength={100} autoComplete="off" /><button type="submit" disabled={Boolean(songAction)}>{songAction === "search" ? "搜索中…" : "搜索前 10 首"}</button><button type="button" className="direct-song-button" onClick={requestSong} disabled={Boolean(songAction)}>{songAction === "direct" ? "提交中…" : "直接点歌"}</button></div>
+                <div className="song-search-row"><input id="song-search" value={songQuery} onChange={(event) => setSongQuery(event.target.value)} placeholder="输入歌曲名、歌手或专辑" maxLength={100} autoComplete="off" /><button type="submit" disabled={Boolean(songAction || albumAction)}>{songAction === "search" ? "搜索中…" : "搜索歌曲"}</button><button type="button" onClick={searchAlbums} disabled={Boolean(songAction || albumAction)}>{albumAction === "search" ? "搜索中…" : "搜索专辑"}</button><button type="button" className="direct-song-button" onClick={requestSong} disabled={Boolean(songAction || albumAction)}>{songAction === "direct" ? "提交中…" : "直接点歌"}</button></div>
                 {songResults.length > 0 && <div className="song-results" aria-label="歌曲搜索结果">{songResults.map((song, index) => { const resultIndex = Number(song.index) || index + 1; return <div className="song-result" key={song.id || `${song.name}-${index}`}><div className="result-cover">{song.cover ? <img src={String(song.cover).replace(/^http:/, "https:")} alt="" /> : "♫"}</div><div><strong>{resultIndex}. {song.name}</strong><span>{song.artists}{song.durationText ? ` · ${song.durationText}` : ""}</span></div><button type="button" onClick={() => selectSong(song, index)} disabled={Boolean(songAction)}>{songAction === `select-${resultIndex}` ? "添加中…" : "加入播放"}</button></div>; })}</div>}
+                {albumResults.length > 0 && !selectedAlbum && <div className="song-results" aria-label="专辑搜索结果">{albumResults.map((album, index) => { const resultIndex = Number(album.index) || index + 1; return <div className="song-result" key={album.id || `${album.name}-${index}`}><div className="result-cover">{album.cover ? <img src={String(album.cover).replace(/^http:/, "https:")} alt="" /> : "◎"}</div><div><strong>{resultIndex}. {album.name}</strong><span>{album.artists}</span></div><button type="button" onClick={() => selectAlbum(album, index)} disabled={Boolean(albumAction)}>{albumAction === `select-${resultIndex}` ? "读取中…" : "查看曲目"}</button></div>; })}</div>}
+                {selectedAlbum && <div className="album-selection"><div className="album-selection-head"><div><strong>《{selectedAlbum.name}》</strong><span>{selectedAlbum.artists} · {selectedAlbum.track_count || albumTracks.length} 首</span></div><button type="button" className="direct-song-button" onClick={() => queueAlbum("全部")} disabled={Boolean(albumAction)}>{albumAction === "queue" ? "加入中…" : "整张加入"}</button></div><div className="album-range"><input aria-label="专辑入队范围" value={albumRange} onChange={(event) => setAlbumRange(event.target.value)} placeholder="全部 / 前5首 / 3-8" maxLength={20} /><button type="button" onClick={() => queueAlbum(albumRange.trim())} disabled={!albumRange.trim() || Boolean(albumAction)}>按范围加入</button></div><div className="song-results" aria-label="专辑曲目">{albumTracks.map((song, index) => { const resultIndex = Number(song.index) || index + 1; return <div className="song-result" key={song.id || `${song.name}-${resultIndex}`}><div className="result-cover">{song.cover ? <img src={String(song.cover).replace(/^http:/, "https:")} alt="" /> : "♫"}</div><div><strong>{resultIndex}. {song.name}</strong><span>{song.artists}{song.durationText ? ` · ${song.durationText}` : ""}</span></div><button type="button" onClick={() => playAlbumTrack(song, index)} disabled={Boolean(albumAction)}>{albumAction === `track-${resultIndex}` ? "添加中…" : "点播"}</button></div>; })}</div>{albumTotalPages > 1 && <div className="album-pagination"><button type="button" onClick={() => showAlbumPage(albumPage - 1)} disabled={albumPage <= 1 || Boolean(albumAction)}>上一页</button><span>{albumPage} / {albumTotalPages}</span><button type="button" onClick={() => showAlbumPage(albumPage + 1)} disabled={albumPage >= albumTotalPages || Boolean(albumAction)}>下一页</button></div>}</div>}
               </form>
               <div className="queue-header"><span>排序</span><span>#</span><span className="queue-song-header">歌曲</span><span>来源</span><span>时长</span><span>操作</span></div>
               <div className="queue-list"><QueueSortableList songs={queue} connected={connected} busy={queueBusy || queueRemoving !== null} removing={queueRemoving} onDragStart={beginQueueDrag} onDragCancel={cancelQueueDrag} onMove={finishQueueDrag} onRemove={removeQueueItem} /></div>

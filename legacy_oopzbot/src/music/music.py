@@ -677,7 +677,11 @@ class MusicHandler(PlaybackMixin):
 
         with self._playback_lock:
             q = self._get_queue(area)
-            next_song = q.play_next()
+            next_song = None
+            while queued := q.play_next():
+                next_song = self._resolve_queued_song(queued, channel, area, user)
+                if next_song:
+                    break
             if not next_song:
                 self.sender.send_message("队列为空，没有下一首了", channel=channel, area=area)
                 return
@@ -1061,16 +1065,55 @@ class MusicHandler(PlaybackMixin):
             logger.debug(f"增量喜欢列表查询失败: {e}")
             return None
 
+    def _resolve_queued_song(
+        self,
+        song: dict,
+        channel: str = "",
+        area: str = "",
+        user: str = "",
+    ) -> dict | None:
+        """Resolve a fresh play URL when a queued album track reaches the head."""
+        resolved = dict(song)
+        if resolved.get("url"):
+            return resolved
+        platform_name = str(resolved.get("platform") or _PLATFORM_NETEASE)
+        platform = self.platforms.get(platform_name)
+        song_id = resolved.get("song_id") or resolved.get("id") or resolved.get("mid")
+        if not platform or not song_id:
+            return None
+        try:
+            url = platform.get_song_url(
+                song_id,
+                expected_duration_ms=(
+                    resolved.get("duration_ms", 0) or resolved.get("duration", 0) or 0
+                ),
+                song_name=resolved.get("name", ""),
+            )
+        except TypeError:
+            url = platform.get_song_url(song_id)
+        if not url:
+            logger.warning("跳过无法获取播放地址的队列歌曲: %s", resolved.get("name"))
+            return None
+        resolved["url"] = url
+        resolved["channel"] = channel or resolved.get("channel", "")
+        resolved["area"] = area or resolved.get("area", "")
+        resolved["user"] = user or resolved.get("user", "")
+        return resolved
+
     def _dequeue_next_song(self, natural_end: bool, current_song: dict | None) -> tuple[dict | None, str]:
         """根据播放模式决定下一首歌。"""
         mode = self.get_play_mode()
         if natural_end and mode == PLAY_MODE_SINGLE and current_song:
             return copy.deepcopy(current_song), PLAY_MODE_SINGLE
         if mode == PLAY_MODE_SHUFFLE and hasattr(self.queue, "pop_random"):
-            return self.queue.pop_random(), "queue"
-        next_song = self.queue.play_next()
-        if next_song:
-            return next_song, "queue"
+            while candidate := self.queue.pop_random():
+                resolved = self._resolve_queued_song(candidate)
+                if resolved:
+                    return resolved, "queue"
+        while next_song := self.queue.play_next():
+            resolved = self._resolve_queued_song(next_song)
+            if resolved:
+                return resolved, "queue"
         if natural_end and mode == PLAY_MODE_LIST and _music_auto_play_enabled():
             return self._build_autoplay_song(current_song), PLAY_MODE_AUTOPLAY
         return None, mode

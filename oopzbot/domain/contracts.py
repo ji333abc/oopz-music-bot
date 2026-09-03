@@ -196,6 +196,14 @@ class QueuePort(Protocol):
         """Append and return the one-based pending position."""
         ...
 
+    def enqueue_many(
+        self,
+        items: Sequence[QueueItem],
+        expected_version: int | None = None,
+    ) -> int:
+        """Atomically append a batch and return the final pending length."""
+        ...
+
     def next_item(self) -> QueueItem | None: ...
 
     def clear(self, expected_version: int | None = None) -> None:

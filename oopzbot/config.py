@@ -90,6 +90,9 @@ class Settings:
     command_history_limit: int = 200
     panel_sse_enabled: bool = True
     panel_sse_heartbeat_seconds: int = 20
+    album_request_enabled: bool = False
+    album_request_max_tracks: int = 30
+    album_request_session_ttl_seconds: int = 300
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -148,6 +151,13 @@ class Settings:
             panel_sse_enabled=_boolean("OOPZ_PANEL_SSE_ENABLED", True),
             panel_sse_heartbeat_seconds=_bounded_integer(
                 "OOPZ_PANEL_SSE_HEARTBEAT_SECONDS", 20, 15, 25
+            ),
+            album_request_enabled=_boolean("OOPZ_ALBUM_REQUEST_ENABLED", False),
+            album_request_max_tracks=_bounded_integer(
+                "OOPZ_ALBUM_REQUEST_MAX_TRACKS", 30, 1, 100
+            ),
+            album_request_session_ttl_seconds=_bounded_integer(
+                "OOPZ_ALBUM_REQUEST_SESSION_TTL_SECONDS", 300, 60, 1800
             ),
             log_level=_text("LOG_LEVEL", "INFO").upper(),
             bridge_private_network=_boolean(

@@ -7,6 +7,7 @@
 
 ### Added
 
+- 专辑点歌模式产品与技术规划书，以及可灰度启用的 QQ 群命令和 Panel 操作闭环：支持专辑检索、曲目选择、整张/前 N 首/区间原子入队，并在歌曲开播时解析最新地址、跳过失效曲目。
 - QQ 音乐扫码登录凭证存储、Cookie 状态文件、动态读取与后台自适应刷新。
 - `oopzbot qqmusic-login` 的登录、状态、刷新和 Cookie 查询命令。
 - QQ Music API 内部 Cookie 热更新端点，以及 Compose/本地托管的分发与重启兜底。
@@ -41,6 +42,7 @@
 
 ### Upgrade notes
 
+- 专辑点歌默认关闭；灰度启用时设置 `OOPZ_ALBUM_REQUEST_ENABLED=true`。可用 `OOPZ_ALBUM_REQUEST_MAX_TRACKS` 和 `OOPZ_ALBUM_REQUEST_SESSION_TTL_SECONDS` 调整单次入队上限与会话有效期；回滚只需将开关改回 `false` 并重启服务，不需要数据迁移。
 - 当前候选分支：`codex/p2-performance-panel`；部署时以远程分支最新提交为准。
 - 升级前确保服务器工作树干净、`.env` 已配置 `QQBOT_BRIDGE_TOKEN` 和 `OOPZ_PANEL_PASSWORD`，并至少保留 1 GiB 可用磁盘。
 - 默认部署先执行 `./oopzctl upgrade --ref codex/p2-performance-panel --dry-run`，确认后执行同一命令并移除 `--dry-run`。

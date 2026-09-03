@@ -187,6 +187,56 @@ class QQMusic:
             if (parsed := self._parse_song(song)) is not None
         ]
 
+    def search_albums(self, keyword: str, limit: int = 5) -> list[dict]:
+        """Search albums through Smartbox, which exposes album mids reliably."""
+        data = self._get("/getSmartbox", params={"key": keyword}) or {}
+        payload = data.get("data") or {}
+        albums = (payload.get("album") or {}).get("itemlist") or []
+        results: list[dict] = []
+        for raw in albums:
+            if not isinstance(raw, dict):
+                continue
+            album_mid = raw.get("mid") or raw.get("id") or raw.get("docid")
+            if not album_mid:
+                continue
+            results.append(
+                {
+                    "id": str(album_mid),
+                    "mid": str(album_mid),
+                    "name": str(raw.get("name") or "未知专辑"),
+                    "artists": str(raw.get("singer") or "未知歌手"),
+                    "cover": str(raw.get("pic") or ""),
+                }
+            )
+            if len(results) >= max(1, int(limit)):
+                break
+        return results
+
+    def get_album(self, album_mid: str) -> dict | None:
+        """Return normalized album metadata and tracks without play URLs."""
+        response = self._get("/getAlbumInfo", params={"albummid": album_mid}) or {}
+        data = response.get("data") or (response.get("response") or {}).get("data") or {}
+        if not isinstance(data, dict):
+            return None
+        tracks = [
+            parsed
+            for raw in (data.get("list") or [])
+            if isinstance(raw, dict) and (parsed := self._parse_song(raw)) is not None
+        ]
+        if not tracks:
+            return None
+        resolved_mid = str(data.get("mid") or data.get("albummid") or album_mid)
+        return {
+            "id": resolved_mid,
+            "mid": resolved_mid,
+            "name": str(data.get("name") or tracks[0].get("album") or "未知专辑"),
+            "artists": str(data.get("singername") or tracks[0].get("artists") or "未知歌手"),
+            "release_date": str(data.get("aDate") or ""),
+            "cover": _ALBUM_COVER_URL.format(mid=resolved_mid),
+            "track_count": len(tracks),
+            "tracks": tracks,
+        }
+
     @staticmethod
     def _extract_play_url(data: dict, song_id: str) -> str:
         """从新旧版本播放接口响应中提取播放地址。"""
@@ -379,6 +429,7 @@ class QQMusic:
             "name": song.get("songname") or song.get("name") or "未知歌曲",
             "artists": artists,
             "album": album_name,
+            "album_mid": album_mid,
             "duration": duration_s * 1000,
             "durationText": f"{duration_s // 60}:{duration_s % 60:02d}",
             "cover": cover,

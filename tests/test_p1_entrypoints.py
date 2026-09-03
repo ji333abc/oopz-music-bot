@@ -224,6 +224,25 @@ class QQCommandResultTransportTests(unittest.IsolatedAsyncioTestCase):
         renderer.assert_awaited_once()
         self.assertIs(renderer.await_args.args[1], result)
 
+    async def test_album_detail_reaches_album_renderer_unchanged(self) -> None:
+        import importlib
+
+        service = importlib.import_module("oopzbot.qqbot")
+        client = object.__new__(service.OopzQQClient)
+        renderer = AsyncMock()
+        result = {
+            "ok": True,
+            "reply_type": "album_detail",
+            "album": {"id": "album-1", "name": "专辑"},
+            "tracks": [{"id": "track-1", "name": "歌曲", "index": 1}],
+        }
+
+        with patch.object(client, "_reply_album_detail", new=renderer):
+            await client._reply_result(types.SimpleNamespace(), result, "user-1")
+
+        renderer.assert_awaited_once()
+        self.assertIs(renderer.await_args.args[1], result)
+
 
 class JMEntryContractTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod

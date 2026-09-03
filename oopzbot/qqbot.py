@@ -514,6 +514,121 @@ class OopzQQClient(botpy.Client):
                 proactive=proactive,
             )
 
+    async def _reply_album_search_results(
+        self,
+        message: GroupMessage,
+        result: dict,
+        requester_id: str,
+        *,
+        proactive: bool = False,
+    ) -> None:
+        albums = result.get("albums") or []
+        lines = ["# QQ音乐专辑搜索", ""]
+        items = []
+        for album in albums:
+            index = int(album.get("index") or 0)
+            name = str(album.get("name") or "未知专辑")
+            artists = str(album.get("artists") or "未知歌手")
+            lines.append(f"{index}. **{name}** — {artists}")
+            items.append(
+                {
+                    "value": str(index),
+                    "label": f"{index}. {name}",
+                    "command": f"专辑选择 {index}",
+                }
+            )
+        lines.extend(["", "> 选择专辑后可点播单曲或整张加入队列"])
+        try:
+            await self._post_group_message(
+                message,
+                {
+                    "msg_type": 2,
+                    **self._reply_identity(message, proactive=proactive),
+                    "markdown": {"content": "\n".join(lines)},
+                    "keyboard": self._command_keyboard(
+                        items, requester_id, "专辑选择"
+                    ),
+                },
+            )
+        except Exception as exc:
+            logger.warning("QQ 专辑搜索结果发送失败，退回纯文本: %s", exc)
+            await self._reply(
+                message,
+                str(result.get("message") or "未找到专辑"),
+                proactive=proactive,
+            )
+
+    async def _reply_album_detail(
+        self,
+        message: GroupMessage,
+        result: dict,
+        requester_id: str,
+        *,
+        proactive: bool = False,
+    ) -> None:
+        album = result.get("album") or {}
+        tracks = result.get("tracks") or []
+        page = int(result.get("page") or 1)
+        total_pages = int(result.get("total_pages") or 1)
+        lines = [
+            f"# {album.get('name', '未知专辑')}",
+            "",
+            f"歌手：{album.get('artists', '未知歌手')}",
+            f"曲目：{album.get('track_count', 0)} 首 · 第 {page}/{total_pages} 页",
+            "",
+        ]
+        items = []
+        for track in tracks:
+            index = int(track.get("index") or 0)
+            name = str(track.get("name") or "未知歌曲")
+            lines.append(f"{index}. **{name}** — {track.get('artists', '未知歌手')}")
+            items.append(
+                {
+                    "value": str(index),
+                    "label": f"{index}. {name}",
+                    "command": f"专辑点歌 {index}",
+                }
+            )
+        items.append(
+            {"value": "all", "label": "整张加入", "command": "专辑加入 全部"}
+        )
+        if page > 1:
+            items.append(
+                {
+                    "value": f"page{page - 1}",
+                    "label": "上一页",
+                    "command": f"专辑曲目 {page - 1}",
+                }
+            )
+        if page < total_pages:
+            items.append(
+                {
+                    "value": f"page{page + 1}",
+                    "label": "下一页",
+                    "command": f"专辑曲目 {page + 1}",
+                }
+            )
+        lines.extend(["", "> 可点播单曲，或整张/指定范围加入队列"])
+        try:
+            await self._post_group_message(
+                message,
+                {
+                    "msg_type": 2,
+                    **self._reply_identity(message, proactive=proactive),
+                    "markdown": {"content": "\n".join(lines)},
+                    "keyboard": self._command_keyboard(
+                        items, requester_id, "专辑点歌", buttons_per_row=2
+                    ),
+                },
+            )
+        except Exception as exc:
+            logger.warning("QQ 专辑详情发送失败，退回纯文本: %s", exc)
+            await self._reply(
+                message,
+                str(result.get("message") or "专辑不可用"),
+                proactive=proactive,
+            )
+
     async def _reply_queue_panel(
         self,
         message: GroupMessage,
@@ -565,6 +680,19 @@ class OopzQQClient(botpy.Client):
             )
             return
         if reply_type == "song_selected" and result.get("song"):
+            await self._reply_song_selected(message, result, proactive=proactive)
+            return
+        if reply_type == "album_search_results" and result.get("albums"):
+            await self._reply_album_search_results(
+                message, result, requester_id, proactive=proactive
+            )
+            return
+        if reply_type == "album_detail" and result.get("tracks"):
+            await self._reply_album_detail(
+                message, result, requester_id, proactive=proactive
+            )
+            return
+        if reply_type == "album_song_selected" and result.get("song"):
             await self._reply_song_selected(message, result, proactive=proactive)
             return
         if reply_type == "queue_panel":

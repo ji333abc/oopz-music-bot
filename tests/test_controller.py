@@ -122,6 +122,21 @@ class MusicQueueTests(unittest.TestCase):
         song["name"] = "changed"
         self.assertEqual(queue.peek_next()["name"], "one")
 
+    def test_batch_append_is_atomic_and_advances_version_once(self) -> None:
+        queue = MusicQueue()
+        version = queue.get_version()
+
+        length = queue.add_many_to_queue(
+            [{"name": "one"}, {"name": "two"}],
+            expected_version=version,
+        )
+
+        self.assertEqual(length, 2)
+        self.assertEqual(queue.get_version(), version + 1)
+        with self.assertRaisesRegex(RuntimeError, "version conflict"):
+            queue.add_many_to_queue([{"name": "three"}], expected_version=version)
+        self.assertEqual([item["name"] for item in queue.get_queue()], ["one", "two"])
+
     def test_adapter_uses_atomic_queue_snapshot(self) -> None:
         queue = MusicQueue()
         queue.add_to_queue({"name": "one", "song_id": "1"})
@@ -234,6 +249,28 @@ class MusicControllerTests(unittest.TestCase):
         self._wait_for_play_count(2)
         self.assertEqual(self.runtime.played[-1], "https://audio.invalid/second.mp3")
         self.assertEqual(self.controller._get_queue("area").get_current()["name"], "second")
+
+    def test_next_song_resolves_fresh_url_for_album_queue_item(self) -> None:
+        queue = self.controller._get_queue("area")
+        queue.add_to_queue(
+            {
+                "song_id": "album-track",
+                "platform": "qq",
+                "name": "album song",
+                "artists": "artist",
+                "duration_ms": 120_000,
+                "url": "",
+            }
+        )
+
+        result = self.controller.play_next("text", "area", "user")
+        self._wait_for_play_count(1)
+
+        self.assertEqual(result["code"], "success")
+        self.assertEqual(
+            self.runtime.played[-1],
+            "https://audio.invalid/album-track.mp3",
+        )
 
     def test_playback_succeeds_when_text_notification_fails(self) -> None:
         self.runtime.fail_messages = True

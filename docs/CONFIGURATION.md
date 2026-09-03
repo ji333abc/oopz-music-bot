@@ -110,6 +110,9 @@ oopzbot discover --area-id <域ID>
 | `OOPZ_SEARCH_CACHE_ENABLED` | `true` | 是否启用进程内有界搜歌缓存 |
 | `OOPZ_SEARCH_CACHE_TTL_SECONDS` | `60` | 正常搜索结果缓存秒数，范围 5–600 |
 | `OOPZ_SEARCH_CACHE_MAX_ENTRIES` | `256` | 搜索缓存条目上限，范围 16–2048 |
+| `OOPZ_ALBUM_REQUEST_ENABLED` | `false` | 是否启用专辑点歌命令；建议先在测试群灰度 |
+| `OOPZ_ALBUM_REQUEST_MAX_TRACKS` | `30` | 单次整张/范围入队上限，范围 1–100 |
+| `OOPZ_ALBUM_REQUEST_SESSION_TTL_SECONDS` | `300` | 专辑搜索与选曲会话有效期，范围 60–1800 秒 |
 | `OOPZ_METRICS_WINDOW_SIZE` | `200` | 每个外部端点的滚动指标样本上限，范围 10–2000 |
 | `OOPZ_PLAYBACK_HISTORY_LIMIT` | `50` | 最近播放持久化上限，范围 10–500 |
 | `OOPZ_FAILURE_HISTORY_LIMIT` | `100` | 结构化失败记录上限，范围 10–1000 |

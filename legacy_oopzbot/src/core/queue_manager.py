@@ -177,6 +177,24 @@ class _InMemoryRedis:
             self._condition.notify_all()
             return len(self._lists[key])
 
+    def queue_append_many(
+        self,
+        key: str,
+        version_key: str,
+        values: list,
+        expected_version: int | None = None,
+    ) -> int:
+        with self._condition:
+            version = int(self._kv.get(version_key, 0) or 0)
+            if expected_version is not None and expected_version != version:
+                raise RuntimeError("queue version conflict")
+            if not values:
+                return len(self._lists.get(key, []))
+            self._get_list(key).extend(values)
+            self._kv[version_key] = version + 1
+            self._condition.notify_all()
+            return len(self._lists[key])
+
     def queue_prepend(self, key: str, version_key: str, value) -> int:
         with self._condition:
             self._get_list(key).insert(0, value)
@@ -392,6 +410,46 @@ class QueueManager:
             pos = int(result) - 1
         logger.info(f"添加到队列: {song_data.get('name')} (位置 {pos})")
         return pos
+
+    def add_many_to_queue(
+        self,
+        song_data_list: list[dict],
+        expected_version: int | None = None,
+    ) -> int:
+        """Atomically append a request batch and return the final queue length."""
+        if not song_data_list:
+            return self.get_queue_length()
+        r = self.redis
+        encoded = [json.dumps(item, ensure_ascii=False) for item in song_data_list]
+        if hasattr(r, "queue_append_many"):
+            length = r.queue_append_many(
+                self._qkey(), self._vkey(), encoded, expected_version
+            )
+        else:
+            expected = -1 if expected_version is None else int(expected_version)
+            try:
+                length = r.eval(
+                    """
+local version=tonumber(redis.call('GET', KEYS[2]) or '0')
+if tonumber(ARGV[1]) >= 0 and version ~= tonumber(ARGV[1]) then
+  return redis.error_reply('QUEUE_VERSION_CONFLICT')
+end
+for i=2,#ARGV do redis.call('RPUSH', KEYS[1], ARGV[i]) end
+redis.call('INCR', KEYS[2])
+return redis.call('LLEN', KEYS[1])
+""",
+                    2,
+                    self._qkey(),
+                    self._vkey(),
+                    expected,
+                    *encoded,
+                )
+            except Exception as exc:
+                if "QUEUE_VERSION_CONFLICT" in str(exc):
+                    raise RuntimeError("queue version conflict") from exc
+                raise
+        logger.info("批量添加到队列: %s 首", len(song_data_list))
+        return int(length)
 
     def add_to_front(self, song_data: dict) -> int:
         """Return a dequeued song to the front and advance the queue version."""
