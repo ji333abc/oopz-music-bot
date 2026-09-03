@@ -77,16 +77,19 @@ class QQMusicSearchTests(unittest.TestCase):
     def test_album_search_uses_smartbox_album_results(self):
         client, calls = self._client_with_response(
             {
-                "data": {
-                    "album": {
-                        "itemlist": [
-                            {
-                                "mid": "album-mid",
-                                "name": "叶惠美",
-                                "singer": "周杰伦",
-                                "pic": "https://cover.invalid/album.jpg",
-                            }
-                        ]
+                "response": {
+                    "code": 0,
+                    "data": {
+                        "album": {
+                            "itemlist": [
+                                {
+                                    "mid": "album-mid",
+                                    "name": "叶惠美",
+                                    "singer": "周杰伦",
+                                    "pic": "https://cover.invalid/album.jpg",
+                                }
+                            ]
+                        }
                     }
                 }
             }
@@ -97,6 +100,27 @@ class QQMusicSearchTests(unittest.TestCase):
         self.assertEqual(albums[0]["id"], "album-mid")
         self.assertEqual(albums[0]["artists"], "周杰伦")
         self.assertEqual(calls, [("/getSmartbox", {"key": "叶惠美"})])
+
+    def test_album_search_keeps_legacy_top_level_data_shape(self):
+        client, _calls = self._client_with_response(
+            {
+                "data": {
+                    "album": {
+                        "list": [
+                            {
+                                "docid": "legacy-album-mid",
+                                "name": "旧版专辑",
+                                "singer": "测试歌手",
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+
+        albums = client.search_albums("旧版专辑")
+
+        self.assertEqual(albums[0]["mid"], "legacy-album-mid")
 
     def test_album_detail_normalizes_tracks_without_play_urls(self):
         client, calls = self._client_with_response(

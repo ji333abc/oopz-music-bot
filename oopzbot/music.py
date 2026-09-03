@@ -190,8 +190,25 @@ class QQMusic:
     def search_albums(self, keyword: str, limit: int = 5) -> list[dict]:
         """Search albums through Smartbox, which exposes album mids reliably."""
         data = self._get("/getSmartbox", params={"key": keyword}) or {}
-        payload = data.get("data") or {}
-        albums = (payload.get("album") or {}).get("itemlist") or []
+        response = data.get("response") or {}
+        response_payload = (
+            response.get("data") or response
+            if isinstance(response, dict)
+            else {}
+        )
+        top_level_payload = data.get("data") or {}
+        payload = response_payload if isinstance(response_payload, dict) else {}
+        if not payload and isinstance(top_level_payload, dict):
+            payload = top_level_payload
+        album_payload = payload.get("album") or {}
+        if not isinstance(album_payload, dict):
+            return []
+        albums = (
+            album_payload.get("itemlist")
+            or album_payload.get("itemList")
+            or album_payload.get("list")
+            or []
+        )
         results: list[dict] = []
         for raw in albums:
             if not isinstance(raw, dict):
