@@ -31,6 +31,11 @@ _LIKED_COMMAND = re.compile(
     r"(?:随机|随机播放|喜欢|随便来一首)(?:\s+\d+)?|"
     r"喜欢列表(?:\s+\d+)?|喜欢点歌\s+\d+"
 )
+_ALBUM_COMMAND = re.compile(
+    r"专辑(?:\s+.+)?|取消专辑|"
+    r"(?:专辑选择|选专辑|专辑点歌)\s*\d+|"
+    r"专辑曲目(?:\s+\d+)?|专辑加入\s+.+"
+)
 
 
 def _normalize_slash(command: str) -> str | None:
@@ -95,6 +100,8 @@ def normalize_oopz_music_command(command: str) -> str | None:
         return normalized
     if normalized == "喜欢用法" or _LIKED_COMMAND.fullmatch(normalized):
         return normalized
+    if _ALBUM_COMMAND.fullmatch(normalized):
+        return normalized
     return None
 
 
@@ -106,4 +113,5 @@ def backend_notifies(command: str) -> bool:
         or re.fullmatch(r"(?:选歌|选择)\s*\d+", command)
         or exact_command_kind(command) in {CommandKind.NEXT, CommandKind.STOP}
         or _LIKED_COMMAND.fullmatch(command)
+        or re.fullmatch(r"专辑点歌\s*\d+", command)
     )

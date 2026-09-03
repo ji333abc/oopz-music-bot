@@ -1290,13 +1290,18 @@ def _play_album_track(
         requester_id=bot_user,
     )
     if not result.ok:
-        return {"ok": False, "message": result.message}
+        return {
+            "ok": False,
+            "message": result.message,
+            "backend_notified": True,
+        }
     _album_sessions.pop(requester_key, None)
     return {
         "ok": True,
         "reply_type": "album_song_selected",
         "message": f"已选择：{song.get('name', '未知歌曲')} - {song.get('artists', '未知歌手')}",
         "song": _qq_song_payload(song),
+        "backend_notified": True,
     }
 
 
@@ -1971,7 +1976,10 @@ def dispatch_oopz_music_command(
     payload = command_result_to_legacy(result)
     _command_event(normalized, payload, "OOPZ")
 
-    if not _oopz_backend_notifies(normalized):
+    backend_notified = _oopz_backend_notifies(normalized)
+    if normalized.startswith("专辑点歌"):
+        backend_notified = bool(payload.get("backend_notified"))
+    if not backend_notified:
         music = _music_handler()
         _notify_music(
             music,

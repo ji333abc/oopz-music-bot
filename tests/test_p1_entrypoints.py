@@ -109,6 +109,24 @@ class OopzMessageCallbackTests(unittest.TestCase):
         )
         self.assertEqual(bridge._modern_oopz_music_command("播放"), "播放")
 
+    def test_oopz_album_commands_normalize_into_shared_parser(self) -> None:
+        from oopzbot import bridge
+
+        commands = (
+            "专辑 叶惠美",
+            "专辑选择 1",
+            "选专辑 1",
+            "专辑曲目 2",
+            "专辑点歌 3",
+            "专辑加入 全部",
+            "专辑加入 前5首",
+            "专辑加入 3-8",
+            "取消专辑",
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(bridge._modern_oopz_music_command(command), command)
+
     def test_oopz_dispatch_uses_transport_target_and_avoids_duplicate_play_reply(self) -> None:
         from oopzbot import bridge
         from oopzbot.domain.contracts import CommandResult
@@ -135,6 +153,88 @@ class OopzMessageCallbackTests(unittest.TestCase):
         self.assertEqual(request.text_channel_id, "text-1")
         self.assertEqual(request.bot_user_id, "")
         notify.assert_not_called()
+
+    def test_oopz_album_search_sends_result_through_text_channel(self) -> None:
+        from oopzbot import bridge
+        from oopzbot.domain.contracts import CommandResult
+
+        with (
+            patch.object(
+                bridge,
+                "_execute_request",
+                return_value=CommandResult(ok=True, message="找到专辑：叶惠美"),
+            ),
+            patch.object(bridge, "_music_handler", return_value=object()),
+            patch.object(bridge, "_notify_music") as notify,
+        ):
+            handled = bridge.dispatch_oopz_music_command(
+                "专辑 叶惠美",
+                "text-1",
+                "area-1",
+                "user-1",
+            )
+
+        self.assertTrue(handled)
+        notify.assert_called_once_with(
+            unittest.mock.ANY,
+            text="找到专辑：叶惠美",
+            channel="text-1",
+            area="area-1",
+        )
+
+    def test_oopz_album_song_avoids_duplicate_backend_reply(self) -> None:
+        from oopzbot import bridge
+        from oopzbot.domain.contracts import CommandResult
+
+        with (
+            patch.object(
+                bridge,
+                "_execute_request",
+                return_value=CommandResult(
+                    ok=True,
+                    message="已选择歌曲",
+                    extras={"backend_notified": True},
+                ),
+            ),
+            patch.object(bridge, "_notify_music") as notify,
+        ):
+            handled = bridge.dispatch_oopz_music_command(
+                "专辑点歌 3",
+                "text-1",
+                "area-1",
+                "user-1",
+            )
+
+        self.assertTrue(handled)
+        notify.assert_not_called()
+
+    def test_oopz_album_song_validation_error_is_sent_to_text_channel(self) -> None:
+        from oopzbot import bridge
+        from oopzbot.domain.contracts import CommandResult
+
+        with (
+            patch.object(
+                bridge,
+                "_execute_request",
+                return_value=CommandResult(ok=False, message="专辑搜索结果已失效"),
+            ),
+            patch.object(bridge, "_music_handler", return_value=object()),
+            patch.object(bridge, "_notify_music") as notify,
+        ):
+            handled = bridge.dispatch_oopz_music_command(
+                "专辑点歌 3",
+                "text-1",
+                "area-1",
+                "user-1",
+            )
+
+        self.assertTrue(handled)
+        notify.assert_called_once_with(
+            unittest.mock.ANY,
+            text="专辑搜索结果已失效",
+            channel="text-1",
+            area="area-1",
+        )
 
     def test_oopz_dispatch_reports_modern_failure_without_legacy_fallback(self) -> None:
         from oopzbot import bridge

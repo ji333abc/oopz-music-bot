@@ -155,7 +155,7 @@ QQ_MUSIC_BASE_URL=http://127.0.0.1:3200
 
 完整说明见 [docs/CONFIGURATION.md](docs/CONFIGURATION.md)。Git 忽略规则覆盖 `.env`、Cookie、Token、日志和运行数据。
 
-## 群命令
+## QQ 群与 OOPZ 文字频道命令
 
 ```text
 点歌 <歌名>        搜索并播放或加入队列
@@ -180,7 +180,7 @@ QQ_MUSIC_BASE_URL=http://127.0.0.1:3200
 帮助
 ```
 
-所有 QQ 群命令都需要先 `@机器人`。
+QQ 群和 OOPZ 文字频道均支持上述专辑命令；在需要提及机器人的频道中先 `@机器人`。
 
 ## 开发
 
