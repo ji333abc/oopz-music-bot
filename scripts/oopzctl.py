@@ -11,11 +11,13 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.error import URLError
 from urllib.parse import urlsplit
 from urllib.request import urlopen
 
@@ -28,6 +30,12 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_DIR = ROOT / "oopz-releases"
+SERVICE_READY_TIMEOUT_SECONDS = 240
+
+# Running ``python scripts/oopzctl.py`` puts only ``scripts/`` on sys.path.
+# Keep the repository package importable for redaction and other lazy imports.
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def _run(
@@ -306,13 +314,66 @@ def _release_image_environment(sha: str) -> dict[str, str]:
     }
 
 
+def _wait_for_command(
+    args: list[str],
+    *,
+    environment: dict[str, str],
+    label: str,
+    timeout: int = SERVICE_READY_TIMEOUT_SECONDS,
+    interval: float = 3,
+) -> None:
+    deadline = time.monotonic() + timeout
+    last_error = ""
+    while True:
+        remaining = max(1, int(deadline - time.monotonic()))
+        try:
+            result = _run(
+                args,
+                timeout=min(20, remaining),
+                environment=environment,
+            )
+            if result.returncode == 0:
+                return
+            last_error = (result.stderr or result.stdout or "命令失败").strip()[-1000:]
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            last_error = str(exc)
+        if time.monotonic() >= deadline:
+            detail = f": {_redact(last_error)}" if last_error else ""
+            raise RuntimeError(f"等待{label}超时{detail}")
+        time.sleep(min(interval, max(0, deadline - time.monotonic())))
+
+
+def _wait_for_url(
+    url: str,
+    *,
+    label: str,
+    timeout: int = SERVICE_READY_TIMEOUT_SECONDS,
+    interval: float = 3,
+) -> None:
+    deadline = time.monotonic() + timeout
+    last_error = ""
+    while True:
+        remaining = max(1, int(deadline - time.monotonic()))
+        try:
+            with urlopen(url, timeout=min(15, remaining)) as response:  # noqa: S310
+                if response.status == 200:
+                    return
+                last_error = f"HTTP {response.status}"
+        except (OSError, URLError) as exc:
+            last_error = str(exc)
+        if time.monotonic() >= deadline:
+            detail = f": {_redact(last_error)}" if last_error else ""
+            raise RuntimeError(f"等待{label}超时{detail}")
+        time.sleep(min(interval, max(0, deadline - time.monotonic())))
+
+
 def _verify_services(
     compose: list[str],
     environment: dict[str, str],
     *,
     public_url: str = "",
 ) -> None:
-    _run(
+    _wait_for_command(
         [
             *compose,
             "exec",
@@ -322,19 +383,10 @@ def _verify_services(
             "-c",
             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18080/readyz', timeout=10).read()",
         ],
-        timeout=60,
-        check=True,
         environment=environment,
+        label="Bot readyz",
     )
-    if public_url:
-        parsed = urlsplit(public_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise RuntimeError("OOPZ_PANEL_PUBLIC_URL 格式无效")
-        health_url = public_url.rstrip("/") + "/api/health"
-        with urlopen(health_url, timeout=15) as response:  # noqa: S310
-            if response.status != 200:
-                raise RuntimeError(f"公网 Panel smoke test 返回 HTTP {response.status}")
-    _run(
+    _wait_for_command(
         [
             *compose,
             "exec",
@@ -344,10 +396,15 @@ def _verify_services(
             "-e",
             "fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
         ],
-        timeout=60,
-        check=True,
         environment=environment,
+        label="Panel health",
     )
+    if public_url:
+        parsed = urlsplit(public_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise RuntimeError("OOPZ_PANEL_PUBLIC_URL 格式无效")
+        health_url = public_url.rstrip("/") + "/api/health"
+        _wait_for_url(health_url, label="公网 Panel health")
 
 
 def upgrade(ref: str, *, profile: str | None, dry_run: bool) -> dict[str, Any]:

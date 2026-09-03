@@ -104,6 +104,33 @@ class OopzctlTests(unittest.TestCase):
             self.assertEqual(manifest["rollback_health"], "ok")
             self.assertFalse(manifest["data_restored"])
 
+    def test_service_verification_retries_during_container_startup(self) -> None:
+        attempts = {"bot": 0, "panel": 0}
+
+        def fake_run(args, **_kwargs):
+            service = "bot" if "bot" in args else "panel"
+            attempts[service] += 1
+            return type(
+                "Result",
+                (),
+                {
+                    "stdout": "",
+                    "stderr": "connection refused" if attempts[service] == 1 else "",
+                    "returncode": 1 if attempts[service] == 1 else 0,
+                },
+            )()
+
+        with (
+            patch.object(oopzctl, "_run", side_effect=fake_run),
+            patch.object(oopzctl.time, "sleep"),
+        ):
+            oopzctl._verify_services(
+                ["docker", "compose"],
+                {"OOPZ_BOT_IMAGE": "oopz-bot:new"},
+            )
+
+        self.assertEqual(attempts, {"bot": 2, "panel": 2})
+
     def test_switch_and_health_failures_restore_the_old_release(self) -> None:
         for failure_stage in ("container unhealthy", "readyz failed", "public smoke failed"):
             with self.subTest(failure_stage=failure_stage), tempfile.TemporaryDirectory() as name:
