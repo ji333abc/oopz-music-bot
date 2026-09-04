@@ -189,6 +189,7 @@ export default function Home() {
   const [events, setEvents] = useState<PanelEvent[]>([]);
   const [jmJobs, setJmJobs] = useState<JmJob[]>([]);
   const [jmEnabled, setJmEnabled] = useState(false);
+  const [albumEnabled, setAlbumEnabled] = useState(false);
   const [songQuery, setSongQuery] = useState("");
   const [songResults, setSongResults] = useState<Song[]>([]);
   const [songAction, setSongAction] = useState("");
@@ -224,6 +225,7 @@ export default function Home() {
     setHealth({});
     setEvents([]);
     setJmJobs([]);
+    setAlbumEnabled(false);
     setExternalMetrics({});
     setSearchCache({});
     setCommandHistory([]);
@@ -257,6 +259,7 @@ export default function Home() {
       setEvents(Array.isArray(data.events) ? data.events as PanelEvent[] : []);
       setJmJobs(Array.isArray(data.jm_jobs) ? data.jm_jobs as JmJob[] : []);
       setJmEnabled(Boolean(data.jm_enabled));
+      setAlbumEnabled(Boolean(data.album_request_enabled));
       setExternalMetrics(data.external_metrics && typeof data.external_metrics === "object" ? data.external_metrics : {});
       setSearchCache(data.search_cache && typeof data.search_cache === "object" ? data.search_cache : {});
       setCommandHistory(Array.isArray(data.command_history) ? data.command_history as CommandTiming[] : []);
@@ -606,7 +609,7 @@ export default function Home() {
               <div className="panel-heading"><div>待播队列 <em>{queue.length}</em></div><div><button className="text-button" onClick={refresh}>同步队列</button><button className="text-button" onClick={clearQueue} disabled={!queue.length || queueBusy}>清空队列</button></div></div>
               <form className="song-picker" onSubmit={searchSongs}>
                 <label htmlFor="song-search">添加歌曲（每个浏览器会话独立保留搜索结果）</label>
-                <div className="song-search-row"><input id="song-search" value={songQuery} onChange={(event) => setSongQuery(event.target.value)} placeholder="输入歌曲名、歌手或专辑" maxLength={100} autoComplete="off" /><button type="submit" disabled={Boolean(songAction || albumAction)}>{songAction === "search" ? "搜索中…" : "搜索歌曲"}</button><button type="button" onClick={searchAlbums} disabled={Boolean(songAction || albumAction)}>{albumAction === "search" ? "搜索中…" : "搜索专辑"}</button><button type="button" className="direct-song-button" onClick={requestSong} disabled={Boolean(songAction || albumAction)}>{songAction === "direct" ? "提交中…" : "直接点歌"}</button></div>
+                <div className={`song-search-row ${albumEnabled ? "" : "album-disabled"}`}><input id="song-search" value={songQuery} onChange={(event) => setSongQuery(event.target.value)} placeholder={albumEnabled ? "输入歌曲名、歌手或专辑" : "输入歌曲名或歌手"} maxLength={100} autoComplete="off" /><button type="submit" disabled={Boolean(songAction || albumAction)}>{songAction === "search" ? "搜索中…" : "搜索歌曲"}</button>{albumEnabled && <button type="button" onClick={searchAlbums} disabled={Boolean(songAction || albumAction)}>{albumAction === "search" ? "搜索中…" : "搜索专辑"}</button>}<button type="button" className="direct-song-button" onClick={requestSong} disabled={Boolean(songAction || albumAction)}>{songAction === "direct" ? "提交中…" : "直接点歌"}</button></div>
                 {songResults.length > 0 && <div className="song-results" aria-label="歌曲搜索结果">{songResults.map((song, index) => { const resultIndex = Number(song.index) || index + 1; return <div className="song-result" key={song.id || `${song.name}-${index}`}><div className="result-cover">{song.cover ? <img src={String(song.cover).replace(/^http:/, "https:")} alt="" /> : "♫"}</div><div><strong>{resultIndex}. {song.name}</strong><span>{song.artists}{song.durationText ? ` · ${song.durationText}` : ""}</span></div><button type="button" onClick={() => selectSong(song, index)} disabled={Boolean(songAction)}>{songAction === `select-${resultIndex}` ? "添加中…" : "加入播放"}</button></div>; })}</div>}
                 {albumResults.length > 0 && !selectedAlbum && <div className="song-results" aria-label="专辑搜索结果">{albumResults.map((album, index) => { const resultIndex = Number(album.index) || index + 1; return <div className="song-result" key={album.id || `${album.name}-${index}`}><div className="result-cover">{album.cover ? <img src={String(album.cover).replace(/^http:/, "https:")} alt="" /> : "◎"}</div><div><strong>{resultIndex}. {album.name}</strong><span>{album.artists}</span></div><button type="button" onClick={() => selectAlbum(album, index)} disabled={Boolean(albumAction)}>{albumAction === `select-${resultIndex}` ? "读取中…" : "查看曲目"}</button></div>; })}</div>}
                 {selectedAlbum && <div className="album-selection"><div className="album-selection-head"><div><strong>《{selectedAlbum.name}》</strong><span>{selectedAlbum.artists} · {selectedAlbum.track_count || albumTracks.length} 首</span></div><button type="button" className="direct-song-button" onClick={() => queueAlbum("全部")} disabled={Boolean(albumAction)}>{albumAction === "queue" ? "加入中…" : "整张加入"}</button></div><div className="album-range"><input aria-label="专辑入队范围" value={albumRange} onChange={(event) => setAlbumRange(event.target.value)} placeholder="全部 / 前5首 / 3-8" maxLength={20} /><button type="button" onClick={() => queueAlbum(albumRange.trim())} disabled={!albumRange.trim() || Boolean(albumAction)}>按范围加入</button></div><div className="song-results" aria-label="专辑曲目">{albumTracks.map((song, index) => { const resultIndex = Number(song.index) || index + 1; return <div className="song-result" key={song.id || `${song.name}-${resultIndex}`}><div className="result-cover">{song.cover ? <img src={String(song.cover).replace(/^http:/, "https:")} alt="" /> : "♫"}</div><div><strong>{resultIndex}. {song.name}</strong><span>{song.artists}{song.durationText ? ` · ${song.durationText}` : ""}</span></div><button type="button" onClick={() => playAlbumTrack(song, index)} disabled={Boolean(albumAction)}>{albumAction === `track-${resultIndex}` ? "添加中…" : "点播"}</button></div>; })}</div>{albumTotalPages > 1 && <div className="album-pagination"><button type="button" onClick={() => showAlbumPage(albumPage - 1)} disabled={albumPage <= 1 || Boolean(albumAction)}>上一页</button><span>{albumPage} / {albumTotalPages}</span><button type="button" onClick={() => showAlbumPage(albumPage + 1)} disabled={albumPage >= albumTotalPages || Boolean(albumAction)}>下一页</button></div>}</div>}

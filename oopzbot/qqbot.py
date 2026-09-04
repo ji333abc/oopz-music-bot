@@ -617,7 +617,7 @@ class OopzQQClient(botpy.Client):
                     **self._reply_identity(message, proactive=proactive),
                     "markdown": {"content": "\n".join(lines)},
                     "keyboard": self._command_keyboard(
-                        items, requester_id, "专辑点歌", buttons_per_row=2
+                        items, requester_id, "专辑点歌", buttons_per_row=3
                     ),
                 },
             )

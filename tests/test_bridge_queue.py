@@ -120,6 +120,14 @@ class _AlbumMusic(_FakeMusic):
         return {"code": "success", "message": "selected"}
 
 
+class _FailedAlbumStartMusic(_AlbumMusic):
+    def play_next(self, *_args) -> dict:
+        return {
+            "code": "error",
+            "message": "连续 3 首歌曲暂不可播放，已停止自动跳过",
+        }
+
+
 class _LegacyQueue:
     """Minimal shape exposed by the embedded legacy Redis QueueManager."""
 
@@ -239,6 +247,39 @@ class QueuePanelTests(unittest.TestCase):
         self.assertEqual(music.queue.get_version(), before + 1)
         self.assertTrue(all(not song["url"] for song in queued))
         self.assertEqual(len({song["batch_id"] for song in queued}), 1)
+
+    def test_album_batch_reports_when_automatic_playback_cannot_start(self) -> None:
+        music = _FailedAlbumStartMusic()
+        requester = "group:failed-album-start"
+        album = _AlbumProvider().get_album("album-1")
+        bridge._album_sessions.put(
+            requester,
+            albums=[],
+            album=album,
+            tracks=album["tracks"],
+        )
+        settings = types.SimpleNamespace(
+            album_request_max_tracks=30,
+            album_request_session_ttl_seconds=300,
+        )
+
+        with patch.object(bridge, "get_settings", return_value=settings):
+            result = bridge._queue_album_tracks(
+                music,
+                "全部",
+                requester,
+                "area",
+                "text",
+                "voice",
+                "bot",
+                expected_version=music.queue.get_version(),
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["playback_started"])
+        self.assertIn("未能开始播放", result["message"])
+        self.assertIn("连续 3 首歌曲暂不可播放", result["message"])
+        self.assertEqual(music.queue.get_queue_length(), 3)
 
     def test_album_track_slice_supports_non_contiguous_positions(self) -> None:
         tracks = [{"id": f"track-{index}"} for index in range(1, 11)]

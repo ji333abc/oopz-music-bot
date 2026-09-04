@@ -20,6 +20,7 @@ nav{display:flex;flex-direction:column;gap:4px}.nav-item{appearance:none;border:
 @media(max-width:480px){.topbar h1{font-size:22px}.connection small{display:none}.stats-grid{grid-template-columns:1fr}.player-body{grid-template-columns:1fr}.cover-art{width:150px;margin:auto}.track-info{text-align:center}.time-row,.player-controls{text-align:left}.song-picker{padding:14px}.song-search-row{grid-template-columns:1fr 1fr}.song-search-row input{grid-column:1/-1}.song-result{grid-template-columns:34px minmax(0,1fr)}.song-result button{grid-column:1/-1}.queue-header{display:none}.queue-row{grid-template-columns:26px 35px minmax(0,1fr) 38px;padding-left:4px;padding-right:4px}.secondary-column{display:flex}.traffic-visual{grid-template-columns:100px minmax(0,1fr)}.traffic-ring{width:100px;height:100px}.settings-modal{padding:24px 19px}}
 
 .album-range{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:7px;margin-top:9px}.album-range input{height:39px;min-width:0;border:1px solid #2b322e;background:#0d1010;color:#eef3f0;border-radius:9px;padding:0 12px;outline:none;font-size:10px}.album-range input:focus{border-color:#718d2a;box-shadow:0 0 0 3px rgba(201,255,47,.06)}.album-range button{height:39px}
+.song-search-row.album-disabled{grid-template-columns:minmax(0,1fr) auto auto}
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
 .queue-header{grid-template-columns:30px 35px 38px minmax(0,1fr) 78px 42px 48px}
 .queue-header .queue-song-header{grid-column:3/5}

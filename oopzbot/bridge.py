@@ -1164,13 +1164,19 @@ def _search_albums(music, keyword: str, requester_key: str) -> dict:
     settings = get_settings()
     _album_sessions.ttl_seconds = settings.album_request_session_ttl_seconds
     _album_sessions.put(requester_key, albums=albums[:5], keyword=keyword)
+    ttl_seconds = int(settings.album_request_session_ttl_seconds)
+    ttl_text = (
+        f"{ttl_seconds // 60}分钟"
+        if ttl_seconds % 60 == 0
+        else f"{ttl_seconds}秒"
+    )
     lines = [f"专辑搜索：{keyword}"]
     lines.extend(
         f"{index}. {album.get('name', '未知专辑')} - "
         f"{album.get('artists', '未知歌手')}"
         for index, album in enumerate(albums[:5], 1)
     )
-    lines.append("5分钟内发送：专辑选择 <编号>")
+    lines.append(f"{ttl_text}内发送：专辑选择 <编号>")
     return {
         "ok": True,
         "reply_type": "album_search_results",
@@ -1424,12 +1430,17 @@ def _queue_album_tracks(
             "expected_version": expected_version,
             "actual_version": exc.actual_version,
         }
+    playback_warning = ""
+    playback_started = before.current is not None
     if before.current is None:
-        _playback_service(music).next(
+        next_result = _playback_service(music).next(
             channel=text_channel,
             area=area,
             requester_id=bot_user,
         )
+        playback_started = next_result.ok
+        if not next_result.ok:
+            playback_warning = f"；未能开始播放：{next_result.message}"
     after = queue.snapshot()
     _album_sessions.pop(requester_key, None)
     return {
@@ -1437,11 +1448,12 @@ def _queue_album_tracks(
         "reply_type": "album_batch_queued",
         "message": (
             f"已加入《{album.get('name', '未知专辑')}》{len(items)} 首；"
-            f"当前待播 {after.queue_length} 首"
+            f"当前待播 {after.queue_length} 首{playback_warning}"
         ),
         "added_count": len(items),
         "batch_id": batch_id,
         "queue_version": after.version,
+        "playback_started": playback_started,
     }
 
 
@@ -2176,6 +2188,7 @@ def _panel_snapshot() -> dict:
         "schema_version": records.get("schema_version", 1),
         "jm_enabled": _env("QQBOT_JM_ENABLED").lower()
         in {"1", "true", "yes", "on"},
+        "album_request_enabled": _album_enabled(),
         "runtime_implementation": getattr(
             runtime,
             "implementation_name",

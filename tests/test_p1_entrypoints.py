@@ -344,6 +344,32 @@ class QQCommandResultTransportTests(unittest.IsolatedAsyncioTestCase):
         renderer.assert_awaited_once()
         self.assertIs(renderer.await_args.args[1], result)
 
+    async def test_album_detail_keyboard_stays_within_five_rows(self) -> None:
+        import importlib
+
+        service = importlib.import_module("oopzbot.qqbot")
+        client = object.__new__(service.OopzQQClient)
+        client._post_group_message = AsyncMock()
+        client._reply_identity = Mock(return_value={})
+        result = {
+            "ok": True,
+            "reply_type": "album_detail",
+            "album": {"id": "album-1", "name": "专辑", "track_count": 30},
+            "tracks": [
+                {"id": f"track-{index}", "name": f"歌曲 {index}", "index": index}
+                for index in range(11, 21)
+            ],
+            "page": 2,
+            "total_pages": 3,
+        }
+
+        await client._reply_album_detail(
+            types.SimpleNamespace(), result, "user-1"
+        )
+
+        payload = client._post_group_message.await_args.args[1]
+        self.assertLessEqual(len(payload["keyboard"]["content"]["rows"]), 5)
+
 
 class JMEntryContractTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod

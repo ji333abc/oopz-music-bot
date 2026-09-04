@@ -29,6 +29,7 @@ from oopzbot.application.search_cache import SearchCache
 from oopzbot.config import get_settings
 
 logger = get_logger("Music")
+_MAX_CONSECUTIVE_QUEUE_RESOLVE_FAILURES = 3
 
 _LIKED_PER_PAGE = 20
 _PLATFORM_NETEASE = "netease"
@@ -665,26 +666,48 @@ class MusicHandler(PlaybackMixin):
         )
         return result
 
-    def play_next(self, channel: str, area: str, user: str) -> None:
+    def play_next(self, channel: str, area: str, user: str) -> dict:
         """播放队列中的下一首"""
         if not self._voice_channel_id:
+            message = "Bot 当前不在语音频道，请先用 /bf 点歌或让 Bot 跟随进入语音频道。"
             self.sender.send_message(
-                "Bot 当前不在语音频道，请先用 /bf 点歌或让 Bot 跟随进入语音频道。",
+                message,
                 channel=channel,
                 area=area,
             )
-            return
+            return {"code": "error", "message": message}
 
         with self._playback_lock:
             q = self._get_queue(area)
             next_song = None
+            skipped = 0
             while queued := q.play_next():
-                next_song = self._resolve_queued_song(queued, channel, area, user)
+                try:
+                    next_song = self._resolve_queued_song(queued, channel, area, user)
+                except Exception as exc:
+                    logger.warning(
+                        "解析队列歌曲失败，已跳过 %s: %s",
+                        queued.get("name") or "未知歌曲",
+                        exc,
+                    )
                 if next_song:
                     break
+                skipped += 1
+                if skipped >= _MAX_CONSECUTIVE_QUEUE_RESOLVE_FAILURES:
+                    break
             if not next_song:
-                self.sender.send_message("队列为空，没有下一首了", channel=channel, area=area)
-                return
+                if skipped:
+                    remaining = q.get_queue_length()
+                    suffix = f"，剩余 {remaining} 首保留在队列中" if remaining else ""
+                    message = (
+                        f"连续 {skipped} 首歌曲暂不可播放，已停止自动跳过{suffix}"
+                    )
+                    code = "error"
+                else:
+                    message = "队列为空，没有下一首了"
+                    code = "success"
+                self.sender.send_message(message, channel=channel, area=area)
+                return {"code": code, "message": message}
 
             next_song["channel"] = channel
             next_song["area"] = area
@@ -720,6 +743,10 @@ class MusicHandler(PlaybackMixin):
         text = self._build_now_playing_text("切换到下一首", next_song)
         attachments = next_song.get("attachments", [])
         self.sender.send_message(text=text, attachments=attachments, channel=channel, area=area)
+        message = "已切换到下一首"
+        if skipped:
+            message += f"（已跳过 {skipped} 首不可播放歌曲）"
+        return {"code": "success", "message": message}
 
     def show_queue(self, channel: str, area: str) -> None:
         """显示当前队列"""
@@ -1105,15 +1132,38 @@ class MusicHandler(PlaybackMixin):
         mode = self.get_play_mode()
         if natural_end and mode == PLAY_MODE_SINGLE and current_song:
             return copy.deepcopy(current_song), PLAY_MODE_SINGLE
+        skipped = 0
         if mode == PLAY_MODE_SHUFFLE and hasattr(self.queue, "pop_random"):
             while candidate := self.queue.pop_random():
-                resolved = self._resolve_queued_song(candidate)
+                resolved = None
+                try:
+                    resolved = self._resolve_queued_song(candidate)
+                except Exception as exc:
+                    logger.warning(
+                        "解析随机队列歌曲失败，已跳过 %s: %s",
+                        candidate.get("name") or "未知歌曲",
+                        exc,
+                    )
                 if resolved:
                     return resolved, "queue"
+                skipped += 1
+                if skipped >= _MAX_CONSECUTIVE_QUEUE_RESOLVE_FAILURES:
+                    return None, "queue_unavailable"
         while next_song := self.queue.play_next():
-            resolved = self._resolve_queued_song(next_song)
+            resolved = None
+            try:
+                resolved = self._resolve_queued_song(next_song)
+            except Exception as exc:
+                logger.warning(
+                    "解析队列歌曲失败，已跳过 %s: %s",
+                    next_song.get("name") or "未知歌曲",
+                    exc,
+                )
             if resolved:
                 return resolved, "queue"
+            skipped += 1
+            if skipped >= _MAX_CONSECUTIVE_QUEUE_RESOLVE_FAILURES:
+                return None, "queue_unavailable"
         if natural_end and mode == PLAY_MODE_LIST and _music_auto_play_enabled():
             return self._build_autoplay_song(current_song), PLAY_MODE_AUTOPLAY
         return None, mode

@@ -13,6 +13,7 @@ from .music import QQMusic
 from .runtime import NameFacade, OopzRuntime, SenderFacade, VoiceFacade
 
 logger = logging.getLogger(__name__)
+_MAX_CONSECUTIVE_QUEUE_RESOLVE_FAILURES = 3
 
 
 class MusicQueue:
@@ -299,10 +300,24 @@ class MusicController:
         area: str,
         user: str,
     ) -> dict:
+        resolved_channel = channel or str(song.get("channel") or "")
+        resolved_area = area or str(song.get("area") or "")
+        resolved_user = user or str(song.get("user") or "")
         if song.get("url"):
-            return dict(song, channel=channel, area=area, user=user or song.get("user", ""))
+            return dict(
+                song,
+                channel=resolved_channel,
+                area=resolved_area,
+                user=resolved_user,
+            )
         platform = str(song.get("platform") or "qq")
-        resolved = self._resolve_playable(song, platform, channel, area, user)
+        resolved = self._resolve_playable(
+            song,
+            platform,
+            resolved_channel,
+            resolved_area,
+            resolved_user,
+        )
         for key in ("batch_id", "album_id", "album_track_number"):
             if key in song:
                 resolved[key] = song[key]
@@ -426,11 +441,20 @@ class MusicController:
                 except (KeyError, RuntimeError) as exc:
                     skipped.append(str(queued.get("name") or "未知歌曲"))
                     logger.warning("跳过不可播放的队列歌曲 %s: %s", skipped[-1], exc)
+                    if len(skipped) >= _MAX_CONSECUTIVE_QUEUE_RESOLVE_FAILURES:
+                        break
             if not next_song:
-                message = "队列已空"
                 if skipped:
-                    message = f"队列中的 {len(skipped)} 首歌曲暂不可播放，已跳过"
-                return {"code": "success", "message": message}
+                    remaining = queue.get_queue_length()
+                    suffix = f"，剩余 {remaining} 首保留在队列中" if remaining else ""
+                    return {
+                        "code": "error",
+                        "message": (
+                            f"连续 {len(skipped)} 首歌曲暂不可播放，已停止自动跳过"
+                            f"{suffix}"
+                        ),
+                    }
+                return {"code": "success", "message": "队列已空"}
             self._start_song(next_song, queue)
             self.notify_message(
                 text=f"正在播放：{next_song['name']} - {next_song['artists']}",

@@ -29,6 +29,8 @@
 ### Fixed
 
 - 专辑搜索现在兼容固定 QQ 音乐 API 2.4.0 的 `response.data` Smartbox 响应封装，不再把有效专辑结果误报为“未找到”。
+- QQ 音乐连续解析失败时最多跳过 3 首并保留其余队列，批量专辑请求会明确报告未能开播；专辑会话现在会主动清理过期项并限制容量。
+- QQ 专辑曲目键盘现在保持在平台行数限制内，默认关闭专辑模式时 Panel 不再显示不可用入口。
 - 安全升级和自动回滚现在会等待 Bot 与 Panel 完成启动并重试健康检查，不再因容器启动瞬间的连接拒绝误判失败。
 - 直接运行仓库的 `./oopzctl` 时会自动加载项目包，不再要求运维人员手动设置 `PYTHONPATH`。
 - 队列内容与 `queue_version` 现在通过共享锁或 Redis Lua 原子读取，避免并发自动切歌时删除或移动错误歌曲。
@@ -46,9 +48,9 @@
 ### Upgrade notes
 
 - 专辑点歌默认关闭；灰度启用时设置 `OOPZ_ALBUM_REQUEST_ENABLED=true`。可用 `OOPZ_ALBUM_REQUEST_MAX_TRACKS` 和 `OOPZ_ALBUM_REQUEST_SESSION_TTL_SECONDS` 调整单次入队上限与会话有效期；回滚只需将开关改回 `false` 并重启服务，不需要数据迁移。
-- 当前候选分支：`codex/p2-performance-panel`；部署时以远程分支最新提交为准。
+- 当前候选分支：`codex/album-request-mode`；部署时以远程分支最新提交为准。
 - 升级前确保服务器工作树干净、`.env` 已配置 `QQBOT_BRIDGE_TOKEN` 和 `OOPZ_PANEL_PASSWORD`，并至少保留 1 GiB 可用磁盘。
-- 默认部署先执行 `./oopzctl upgrade --ref codex/p2-performance-panel --dry-run`，确认后执行同一命令并移除 `--dry-run`。
+- 默认部署先执行 `./oopzctl upgrade --ref codex/album-request-mode --dry-run`，确认后执行同一命令并移除 `--dry-run`。
 - 启用 JM 时必须设置 `QQBOT_JM_ENABLED=true`，并在两条升级命令中同时添加 `--profile jm`。
 - 升级工具会在切换前创建并校验 data/Redis 备份；健康检查失败时恢复旧提交和旧镜像，不自动覆盖数据。
 - 回滚使用 `./oopzctl rollback --release <RELEASE_ID>`；只有明确需要恢复数据时才运行带 `--confirm` 的 restore。

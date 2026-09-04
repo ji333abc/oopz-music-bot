@@ -272,6 +272,45 @@ class MusicControllerTests(unittest.TestCase):
             "https://audio.invalid/album-track.mp3",
         )
 
+    def test_next_song_stops_after_three_resolution_failures(self) -> None:
+        self.controller.platforms["qq"] = _UnplayableMusic()
+        queue = self.controller._get_queue("area")
+        for index in range(5):
+            queue.add_to_queue(
+                {
+                    "song_id": f"album-track-{index}",
+                    "platform": "qq",
+                    "name": f"album song {index}",
+                    "url": "",
+                }
+            )
+
+        result = self.controller.play_next("text", "area", "user")
+
+        self.assertEqual(result["code"], "error")
+        self.assertIn("连续 3 首", result["message"])
+        self.assertEqual(queue.get_queue_length(), 2)
+
+    def test_delayed_resolution_preserves_stored_request_context(self) -> None:
+        resolved = self.controller._resolve_queued_song(
+            {
+                "song_id": "album-track",
+                "platform": "qq",
+                "name": "album song",
+                "channel": "stored-text",
+                "area": "stored-area",
+                "user": "stored-user",
+                "url": "",
+            },
+            "",
+            "",
+            "",
+        )
+
+        self.assertEqual(resolved["channel"], "stored-text")
+        self.assertEqual(resolved["area"], "stored-area")
+        self.assertEqual(resolved["user"], "stored-user")
+
     def test_playback_succeeds_when_text_notification_fails(self) -> None:
         self.runtime.fail_messages = True
 
