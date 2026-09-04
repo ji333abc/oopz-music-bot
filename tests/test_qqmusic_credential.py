@@ -17,6 +17,7 @@ from oopzbot.qqmusic_credential import (
     CredentialStore,
     compute_refresh_interval,
     current_cookie,
+    open_qqmusic_client,
     propagate_cookie,
 )
 
@@ -69,6 +70,61 @@ class CredentialStoreTests(unittest.TestCase):
 
 
 class RefreshServiceTests(unittest.TestCase):
+    def test_clients_serialize_access_to_same_device_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            device_path = Path(directory) / "qqmusic-device.json"
+            first_inside = asyncio.Event()
+            release_first = asyncio.Event()
+            second_started = asyncio.Event()
+            second_inside = asyncio.Event()
+            active_clients = 0
+            max_active_clients = 0
+
+            class Client:
+                def __init__(self, *, device_path: str):
+                    self.device_path = device_path
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *_args):
+                    return None
+
+            fake_api = SimpleNamespace(Client=Client)
+
+            async def use_client(*, first: bool) -> None:
+                nonlocal active_clients, max_active_clients
+                if not first:
+                    second_started.set()
+                async with open_qqmusic_client(fake_api, device_path=device_path):
+                    active_clients += 1
+                    max_active_clients = max(max_active_clients, active_clients)
+                    try:
+                        if first:
+                            first_inside.set()
+                            await release_first.wait()
+                        else:
+                            second_inside.set()
+                    finally:
+                        active_clients -= 1
+
+            async def run_clients() -> bool:
+                first = asyncio.create_task(use_client(first=True))
+                await first_inside.wait()
+                second = asyncio.create_task(use_client(first=False))
+                await second_started.wait()
+                await asyncio.sleep(0.1)
+                overlapped = second_inside.is_set()
+                release_first.set()
+                await asyncio.gather(first, second)
+                return overlapped
+
+            overlapped = asyncio.run(run_clients())
+
+            self.assertFalse(overlapped)
+            self.assertEqual(max_active_clients, 1)
+            self.assertTrue(device_path.with_name(device_path.name + ".lock").is_file())
+
     def test_refresher_reuses_persistent_device_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             device_path = Path(directory) / "nested" / "qqmusic-device.json"

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import logging
 import os
@@ -20,7 +21,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import requests
 
@@ -37,6 +38,7 @@ NETWORK_BACKOFF_SECONDS = (600, 1800, 7200)
 NO_CREDENTIAL_POLL_SECONDS = 3600
 
 _CREDENTIAL_CACHE_TIME = 15
+_DEVICE_LOCK_POLL_SECONDS = 0.05
 _LOCK = threading.Lock()
 
 
@@ -59,6 +61,69 @@ def device_state_path(credential_path: Path | None = None) -> Path:
     return path.parent / DEFAULT_DEVICE_FILE
 
 
+def _try_lock_device_file(handle: BinaryIO) -> bool:
+    """Try to acquire an OS-backed exclusive lock without blocking the event loop."""
+    handle.seek(0)
+    if os.name == "nt":
+        import msvcrt
+
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                return False
+            raise
+    else:
+        import fcntl
+
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+    return True
+
+
+def _unlock_device_file(handle: BinaryIO) -> None:
+    handle.seek(0)
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@asynccontextmanager
+async def _device_file_lock(device_path: Path) -> AsyncIterator[None]:
+    """Serialize clients that share a persisted device across processes."""
+    lock_path = device_path.with_name(device_path.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+b")
+    if handle.seek(0, os.SEEK_END) == 0:
+        handle.write(b"\0")
+        handle.flush()
+    try:
+        lock_path.chmod(0o600)
+    except OSError:
+        pass
+
+    acquired = False
+    try:
+        while not acquired:
+            acquired = _try_lock_device_file(handle)
+            if not acquired:
+                await asyncio.sleep(_DEVICE_LOCK_POLL_SECONDS)
+        yield
+    finally:
+        try:
+            if acquired:
+                _unlock_device_file(handle)
+        finally:
+            handle.close()
+
+
 @asynccontextmanager
 async def open_qqmusic_client(
     qqmusic_api: Any,
@@ -68,15 +133,16 @@ async def open_qqmusic_client(
     """Open a client that consistently reuses one persisted virtual device."""
     path = Path(device_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        async with qqmusic_api.Client(device_path=str(path)) as client:
-            yield client
-    finally:
-        if path.is_file():
-            try:
-                path.chmod(0o600)
-            except OSError:
-                pass
+    async with _device_file_lock(path):
+        try:
+            async with qqmusic_api.Client(device_path=str(path)) as client:
+                yield client
+        finally:
+            if path.is_file():
+                try:
+                    path.chmod(0o600)
+                except OSError:
+                    pass
 
 
 def cookie_string(credential: dict[str, Any]) -> str:
