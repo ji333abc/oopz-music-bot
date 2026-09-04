@@ -23,6 +23,7 @@ from .qqmusic_credential import (
     cookie_string,
     expiry_timestamp,
     extract_uin,
+    open_qqmusic_client,
     publish_cookie,
     require_qqmusic_api,
 )
@@ -189,7 +190,10 @@ def cmd_login(args: argparse.Namespace, store: CredentialStore) -> int:
     timeout_hint = args.timeout
 
     async def _login() -> dict:
-        async with qqmusic_api.Client() as client:
+        async with open_qqmusic_client(
+            qqmusic_api,
+            device_path=store.device_path,
+        ) as client:
             session = QRCodeLoginSession(
                 client.login,
                 login_type,
@@ -247,7 +251,10 @@ def cmd_status(args: argparse.Namespace, store: CredentialStore) -> int:
 
     async def _check():
         cred = qqmusic_api.Credential.model_validate(credential)
-        async with qqmusic_api.Client() as client:
+        async with open_qqmusic_client(
+            qqmusic_api,
+            device_path=store.device_path,
+        ) as client:
             return await client.login.check_expired(cred)
 
     print("正在请求服务端校验登录态...")

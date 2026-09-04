@@ -4,7 +4,8 @@
 ``qqmusic_api.Credential``（含 ``refresh_key``/``refresh_token``），
 是 Cookie 的唯一事实源；刷新成功后派生出无敏感续期字段、可被旧核心
 等轻量组件直接读取的 Cookie 状态文件。``QQ_MUSIC_COOKIE`` 环境变量
-降级为手动兜底：有凭证文件时以文件为准。
+降级为手动兜底：有凭证文件时以文件为准。QQ Music API 的虚拟设备身份
+保存在凭证文件同目录，所有登录与续期请求都必须复用它。
 """
 
 from __future__ import annotations
@@ -15,7 +16,8 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +27,7 @@ import requests
 logger = logging.getLogger("QQMusicCredential")
 
 DEFAULT_CREDENTIAL_FILE = "data/qqmusic-credential.json"
+DEFAULT_DEVICE_FILE = "qqmusic-device.json"
 DEFAULT_REFRESH_MIN_HOURS = 6
 DEFAULT_REFRESH_MAX_HOURS = 24
 # 刷新凭据彻底失效（需要重新扫码）后的重试间隔。
@@ -48,6 +51,32 @@ def cookie_state_path(credential_path: Path | None = None) -> Path:
         return Path(configured)
     path = Path(credential_path or default_credential_file())
     return path.parent / "qqmusic-cookie.json"
+
+
+def device_state_path(credential_path: Path | None = None) -> Path:
+    """Return the persistent QQ Music virtual-device file beside the credential."""
+    path = Path(credential_path or default_credential_file())
+    return path.parent / DEFAULT_DEVICE_FILE
+
+
+@asynccontextmanager
+async def open_qqmusic_client(
+    qqmusic_api: Any,
+    *,
+    device_path: Path,
+) -> AsyncIterator[Any]:
+    """Open a client that consistently reuses one persisted virtual device."""
+    path = Path(device_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        async with qqmusic_api.Client(device_path=str(path)) as client:
+            yield client
+    finally:
+        if path.is_file():
+            try:
+                path.chmod(0o600)
+            except OSError:
+                pass
 
 
 def cookie_string(credential: dict[str, Any]) -> str:
@@ -97,6 +126,7 @@ class CredentialStore:
     def __init__(self, credential_path: Path | None = None):
         self.path = Path(credential_path or default_credential_file())
         self.state_path = cookie_state_path(self.path)
+        self.device_path = device_state_path(self.path)
 
     def load(self) -> tuple[dict[str, Any], float] | None:
         """返回 ``(credential_dict, saved_at)``；文件缺失或损坏时返回 None。"""
@@ -323,10 +353,16 @@ class RefreshOutcome:
 class CredentialRefresher:
     """执行一次凭证刷新；独立出来便于测试替换网络调用。"""
 
+    def __init__(self, *, device_path: Path | None = None):
+        self.device_path = Path(device_path or device_state_path())
+
     async def refresh(self, credential: dict[str, Any]) -> dict[str, Any]:
         qqmusic_api = require_qqmusic_api()
         cred = qqmusic_api.Credential.model_validate(credential)
-        async with qqmusic_api.Client() as client:
+        async with open_qqmusic_client(
+            qqmusic_api,
+            device_path=self.device_path,
+        ) as client:
             new_cred = await client.login.refresh_credential(cred)
         return _credential_to_dict(new_cred)
 
@@ -350,7 +386,7 @@ class CookieRefreshService:
         on_publish: Callable[[dict[str, Any]], None] | None = None,
     ):
         self.store = store or CredentialStore()
-        self.refresher = refresher or CredentialRefresher()
+        self.refresher = refresher or CredentialRefresher(device_path=self.store.device_path)
         self.min_hours = min_hours
         self.max_hours = max_hours
         self.on_publish = on_publish

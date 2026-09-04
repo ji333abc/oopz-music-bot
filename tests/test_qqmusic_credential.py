@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 from oopzbot.qqmusic_credential import (
     NETWORK_BACKOFF_SECONDS,
     CookieRefreshService,
+    CredentialRefresher,
     CredentialStore,
     compute_refresh_interval,
     current_cookie,
@@ -50,6 +51,10 @@ class CredentialStoreTests(unittest.TestCase):
             self.assertEqual(state["cookie"], "uin=12345678; qm_keyst=key-1; qqmusic_key=key-1")
             self.assertNotIn("refresh_key", state)
 
+    def test_device_state_file_is_beside_custom_credential(self) -> None:
+        store = CredentialStore(Path("custom") / "account.json")
+        self.assertEqual(store.device_path, Path("custom") / "qqmusic-device.json")
+
     def test_current_cookie_uses_file_change_and_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch.dict(
             os.environ, {"QQ_MUSIC_COOKIE_STATE_FILE": str(Path(directory) / "cookie.json")}, clear=False
@@ -64,6 +69,40 @@ class CredentialStoreTests(unittest.TestCase):
 
 
 class RefreshServiceTests(unittest.TestCase):
+    def test_refresher_reuses_persistent_device_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            device_path = Path(directory) / "nested" / "qqmusic-device.json"
+            client_paths: list[str] = []
+
+            class Credential:
+                @staticmethod
+                def model_validate(value):
+                    return value
+
+            class Login:
+                async def refresh_credential(self, value):
+                    return value
+
+            class Client:
+                def __init__(self, *, device_path: str):
+                    client_paths.append(device_path)
+                    self.login = Login()
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *_args):
+                    return None
+
+            fake_api = SimpleNamespace(Client=Client, Credential=Credential)
+            refresher = CredentialRefresher(device_path=device_path)
+            with patch("oopzbot.qqmusic_credential.require_qqmusic_api", return_value=fake_api):
+                result = asyncio.run(refresher.refresh(credential()))
+
+            self.assertEqual(result["musickey"], "key-1")
+            self.assertEqual(client_paths, [str(device_path)])
+            self.assertTrue(device_path.parent.is_dir())
+
     def test_tick_waits_until_due_then_refreshes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = CredentialStore(Path(directory) / "credential.json")

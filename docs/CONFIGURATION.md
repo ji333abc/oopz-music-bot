@@ -128,7 +128,7 @@ oopzbot qqmusic-login status
 
 `login` 会直接在终端输出可扫描的黑白二维码，并同时保存二维码图片；因此通过 SSH 登录服务器后也可以直接拿手机扫描。若终端不支持 ANSI 色彩，可打开保存的图片，或加 `--no-terminal-qr` 关闭终端输出。
 
-完整凭证保存到 `QQ_MUSIC_CREDENTIAL_FILE`，派生的运行时 Cookie 保存到同目录的 `qqmusic-cookie.json`；两者都不应提交到版本库。服务会在 refresh key 或 musickey 的有效窗口内自适应刷新，并立即更新新旧音乐核心。
+完整凭证保存到 `QQ_MUSIC_CREDENTIAL_FILE`，派生的运行时 Cookie 保存到同目录的 `qqmusic-cookie.json`；两者都不应提交到版本库。QQ Music API 使用的虚拟设备身份保存在同目录的 `qqmusic-device.json`，登录、状态校验和自动刷新都会复用该文件。不要删除或在不同实例之间覆盖这个设备文件，否则 QQ 音乐可能把下一次刷新识别为一台新设备。服务会在 refresh key 或 musickey 的有效窗口内自适应刷新，并立即更新新旧音乐核心。
 
 Compose 部署会通过仅限内部网络的 `qqmusic:3201` 热更新 QQ Music API。Bot 本地托管 API 时也会尝试热更新，失败则重启它自己启动的子进程。使用第三方外部 API 时，Python 音乐核心仍会动态读取本地状态文件；如该 API 不提供热更新端点，需由其自身支持 Cookie 轮换。
 

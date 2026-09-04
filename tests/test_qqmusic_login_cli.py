@@ -5,11 +5,19 @@ import io
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 
 from oopzbot.qqmusic_credential import CredentialStore
-from oopzbot.qqmusic_login import _decode_qr_modules, _print_terminal_qr, build_parser, cmd_cookie
+from oopzbot.qqmusic_login import (
+    _decode_qr_modules,
+    _print_terminal_qr,
+    build_parser,
+    cmd_cookie,
+    cmd_status,
+)
 
 
 class QQMusicLoginCliTests(unittest.TestCase):
@@ -81,6 +89,49 @@ class QQMusicLoginCliTests(unittest.TestCase):
                 code = cmd_cookie(None, store)
             self.assertEqual(code, 0)
             self.assertIn("cookie-key", store.state_path.read_text(encoding="utf-8"))
+
+    def test_status_reuses_device_file_beside_credential(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = CredentialStore(Path(directory) / "credential.json")
+            store.save(
+                {
+                    "musicid": "10001",
+                    "musickey": "cookie-key",
+                    "musickey_create_time": 1,
+                    "key_expires_in": 1,
+                },
+                source="test",
+            )
+            client_paths: list[str] = []
+
+            class Credential:
+                @staticmethod
+                def model_validate(value):
+                    return value
+
+            class Client:
+                def __init__(self, *, device_path: str):
+                    client_paths.append(device_path)
+                    self.login = self
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *_args):
+                    return None
+
+                async def check_expired(self, _credential):
+                    return False
+
+            fake_api = SimpleNamespace(Client=Client, Credential=Credential)
+            with (
+                patch("oopzbot.qqmusic_login.require_qqmusic_api", return_value=fake_api),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                code = cmd_status(None, store)
+
+            self.assertEqual(code, 0)
+            self.assertEqual(client_paths, [str(store.device_path)])
 
 
 if __name__ == "__main__":
