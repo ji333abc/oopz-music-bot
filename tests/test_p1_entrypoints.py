@@ -121,6 +121,7 @@ class OopzMessageCallbackTests(unittest.TestCase):
             "专辑加入 全部",
             "专辑加入 前5首",
             "专辑加入 3-8",
+            "专辑加入 1 3 5 7 9",
             "取消专辑",
         )
         for command in commands:

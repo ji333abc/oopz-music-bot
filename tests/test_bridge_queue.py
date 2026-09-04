@@ -240,6 +240,23 @@ class QueuePanelTests(unittest.TestCase):
         self.assertTrue(all(not song["url"] for song in queued))
         self.assertEqual(len({song["batch_id"] for song in queued}), 1)
 
+    def test_album_track_slice_supports_non_contiguous_positions(self) -> None:
+        tracks = [{"id": f"track-{index}"} for index in range(1, 11)]
+
+        selected = bridge._album_track_slice(tracks, "1 3 5 7 9")
+        reordered = bridge._album_track_slice(tracks, "9，5,1 5")
+
+        self.assertEqual(
+            [track["id"] for track in selected or []],
+            ["track-1", "track-3", "track-5", "track-7", "track-9"],
+        )
+        self.assertEqual(
+            [track["id"] for track in reordered or []],
+            ["track-9", "track-5", "track-1"],
+        )
+        self.assertIsNone(bridge._album_track_slice(tracks, "1 11"))
+        self.assertIsNone(bridge._album_track_slice(tracks, "1 three 5"))
+
     def test_album_search_and_selection_create_requester_session(self) -> None:
         music = _AlbumMusic()
         provider = _AlbumProvider()

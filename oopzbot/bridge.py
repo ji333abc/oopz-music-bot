@@ -117,7 +117,7 @@ _HELP_MESSAGE = """Music-bot 使用帮助
 ├─ 专辑 <专辑名>
 ├─ 专辑选择 <编号>
 ├─ 专辑点歌 <曲目编号>
-├─ 专辑加入 全部 / 前N首 / N-M
+├─ 专辑加入 全部 / 前N首 / N-M / N N ...
 └─ 取消专辑
 
 👥 OOPZ频道
@@ -1199,7 +1199,7 @@ def _album_detail_result(session: dict, page: int = 1) -> dict:
         f"{song.get('artists', '未知歌手')}"
         for index, song in enumerate(visible, start + 1)
     )
-    lines.append("发送：专辑点歌 <编号>，或 专辑加入 全部/前N首/N-M")
+    lines.append("发送：专辑点歌 <编号>，或 专辑加入 全部/前N首/N-M/N N ...")
     return {
         "ok": True,
         "reply_type": "album_detail",
@@ -1306,18 +1306,30 @@ def _play_album_track(
 
 
 def _album_track_slice(tracks: list[dict], selection: str) -> list[dict] | None:
-    value = re.sub(r"\s+", "", selection)
-    if value in {"全部", "整张", "全选"}:
+    value = selection.strip()
+    compact = re.sub(r"\s+", "", value)
+    if compact in {"全部", "整张", "全选"}:
         return tracks
-    front = re.fullmatch(r"前(\d+)首?", value)
+    front = re.fullmatch(r"前(\d+)首?", compact)
     if front:
         return tracks[: int(front.group(1))]
-    span = re.fullmatch(r"(\d+)(?:-|~|～|至|—)(\d+)", value)
+    span = re.fullmatch(r"(\d+)(?:-|~|～|至|—)(\d+)", compact)
     if span:
         start, end = int(span.group(1)), int(span.group(2))
         if start < 1 or end < start or end > len(tracks):
             return None
         return tracks[start - 1 : end]
+    if re.fullmatch(r"\d+(?:[\s,，、]+\d+)*", value):
+        positions = [int(item) for item in re.split(r"[\s,，、]+", value)]
+        if any(position < 1 or position > len(tracks) for position in positions):
+            return None
+        selected: list[dict] = []
+        seen: set[int] = set()
+        for position in positions:
+            if position not in seen:
+                selected.append(tracks[position - 1])
+                seen.add(position)
+        return selected
     return None
 
 
@@ -1374,7 +1386,10 @@ def _queue_album_tracks(
     if chosen is None or not chosen:
         return {
             "ok": False,
-            "message": f"范围无效，请使用“全部”“前N首”或“1-{len(all_tracks)}”",
+            "message": (
+                f"选择无效，请使用“全部”“前N首”“1-{len(all_tracks)}”"
+                "或空格分隔编号（如：1 3 5）"
+            ),
         }
     maximum = get_settings().album_request_max_tracks
     if len(chosen) > maximum:
