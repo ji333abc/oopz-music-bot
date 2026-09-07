@@ -78,6 +78,56 @@ class _RecordingPlaybackMusic(_FakeMusic):
         return {"code": "success", "message": "已点歌"}
 
 
+class _AlbumProvider:
+    def search_albums(self, keyword: str, limit: int = 5) -> list[dict]:
+        return [
+            {"id": "album-1", "name": keyword, "artists": "artist", "cover": ""}
+        ][:limit]
+
+    def get_album(self, album_id: str) -> dict:
+        return {
+            "id": album_id,
+            "name": "album",
+            "artists": "artist",
+            "track_count": 3,
+            "tracks": [
+                {
+                    "id": f"track-{index}",
+                    "name": f"song-{index}",
+                    "artists": "artist",
+                    "album": "album",
+                    "duration": 180_000,
+                    "durationText": "3:00",
+                }
+                for index in range(1, 4)
+            ],
+        }
+
+
+class _AlbumMusic(_FakeMusic):
+    def __init__(self) -> None:
+        super().__init__()
+        self._voice_channel_id = "voice"
+        self._voice_channel_area = "area"
+
+    def play_next(self, *_args) -> dict:
+        song = self.queue.play_next()
+        if song:
+            self.queue.set_current(song)
+        return {"code": "success", "message": "next"}
+
+    def play_song_choice(self, *_args) -> dict:
+        return {"code": "success", "message": "selected"}
+
+
+class _FailedAlbumStartMusic(_AlbumMusic):
+    def play_next(self, *_args) -> dict:
+        return {
+            "code": "error",
+            "message": "连续 3 首歌曲暂不可播放，已停止自动跳过",
+        }
+
+
 class _LegacyQueue:
     """Minimal shape exposed by the embedded legacy Redis QueueManager."""
 
@@ -161,6 +211,144 @@ class QueuePanelTests(unittest.TestCase):
         self.assertEqual(len(result["queue_all"]), 12)
         self.assertEqual(result["queue_items"][0]["index"], 1)
 
+    def test_album_batch_enqueue_is_one_versioned_write_without_urls(self) -> None:
+        music = _AlbumMusic()
+        music.queue.set_current({"song_id": "current", "name": "current"})
+        requester = "group:user"
+        provider = _AlbumProvider()
+        album = provider.get_album("album-1")
+        bridge._album_sessions.put(
+            requester,
+            albums=[],
+            album=album,
+            tracks=album["tracks"],
+        )
+        settings = types.SimpleNamespace(
+            album_request_max_tracks=30,
+            album_request_session_ttl_seconds=300,
+        )
+        before = music.queue.get_version()
+
+        with patch.object(bridge, "get_settings", return_value=settings):
+            result = bridge._queue_album_tracks(
+                music,
+                "全部",
+                requester,
+                "area",
+                "text",
+                "voice",
+                "bot",
+                expected_version=before,
+            )
+
+        queued = music.queue.get_queue()
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(queued), 3)
+        self.assertEqual(music.queue.get_version(), before + 1)
+        self.assertTrue(all(not song["url"] for song in queued))
+        self.assertEqual(len({song["batch_id"] for song in queued}), 1)
+
+    def test_album_batch_reports_when_automatic_playback_cannot_start(self) -> None:
+        music = _FailedAlbumStartMusic()
+        requester = "group:failed-album-start"
+        album = _AlbumProvider().get_album("album-1")
+        bridge._album_sessions.put(
+            requester,
+            albums=[],
+            album=album,
+            tracks=album["tracks"],
+        )
+        settings = types.SimpleNamespace(
+            album_request_max_tracks=30,
+            album_request_session_ttl_seconds=300,
+        )
+
+        with patch.object(bridge, "get_settings", return_value=settings):
+            result = bridge._queue_album_tracks(
+                music,
+                "全部",
+                requester,
+                "area",
+                "text",
+                "voice",
+                "bot",
+                expected_version=music.queue.get_version(),
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["playback_started"])
+        self.assertIn("未能开始播放", result["message"])
+        self.assertIn("连续 3 首歌曲暂不可播放", result["message"])
+        self.assertEqual(music.queue.get_queue_length(), 3)
+
+    def test_album_track_slice_supports_non_contiguous_positions(self) -> None:
+        tracks = [{"id": f"track-{index}"} for index in range(1, 11)]
+
+        selected = bridge._album_track_slice(tracks, "1 3 5 7 9")
+        reordered = bridge._album_track_slice(tracks, "9，5,1 5")
+
+        self.assertEqual(
+            [track["id"] for track in selected or []],
+            ["track-1", "track-3", "track-5", "track-7", "track-9"],
+        )
+        self.assertEqual(
+            [track["id"] for track in reordered or []],
+            ["track-9", "track-5", "track-1"],
+        )
+        self.assertIsNone(bridge._album_track_slice(tracks, "1 11"))
+        self.assertIsNone(bridge._album_track_slice(tracks, "1 three 5"))
+
+    def test_album_search_and_selection_create_requester_session(self) -> None:
+        music = _AlbumMusic()
+        provider = _AlbumProvider()
+        requester = "group:album-user"
+        settings = types.SimpleNamespace(album_request_session_ttl_seconds=300)
+
+        with (
+            patch.object(bridge, "get_settings", return_value=settings),
+            patch.object(bridge, "_album_provider", return_value=provider),
+        ):
+            searched = bridge._search_albums(music, "album", requester)
+            selected = bridge._select_album(music, 1, requester)
+
+        self.assertEqual(searched["reply_type"], "album_search_results")
+        self.assertEqual(selected["reply_type"], "album_detail")
+        self.assertEqual(len(selected["tracks"]), 3)
+
+    def test_album_command_is_feature_gated_and_routes_when_enabled(self) -> None:
+        music = _AlbumMusic()
+        provider = _AlbumProvider()
+        request = bridge.CommandRequest(
+            command="专辑 album",
+            requester_id="user",
+            group_openid="group",
+            source="panel",
+        )
+        disabled = types.SimpleNamespace(album_request_enabled=False)
+        enabled = types.SimpleNamespace(
+            album_request_enabled=True,
+            album_request_session_ttl_seconds=300,
+        )
+
+        with (
+            patch.object(bridge, "_command_config", return_value=("area", "text", "voice", "bot")),
+            patch.object(bridge, "_music_handler", return_value=music),
+            patch.object(bridge, "_album_provider", return_value=provider),
+            patch.object(bridge, "get_settings", return_value=disabled),
+        ):
+            blocked = bridge._execute_command_impl(request)
+        with (
+            patch.object(bridge, "_command_config", return_value=("area", "text", "voice", "bot")),
+            patch.object(bridge, "_music_handler", return_value=music),
+            patch.object(bridge, "_album_provider", return_value=provider),
+            patch.object(bridge, "get_settings", return_value=enabled),
+        ):
+            routed = bridge._execute_command_impl(request)
+
+        self.assertFalse(blocked["ok"])
+        self.assertIn("尚未启用", blocked["message"])
+        self.assertEqual(routed["reply_type"], "album_search_results")
+
     def test_remove_multiple_positions_returns_refreshed_panel(self) -> None:
         music = _FakeMusic()
         for name in ("one", "two", "three", "four"):
@@ -173,6 +361,38 @@ class QueuePanelTests(unittest.TestCase):
         self.assertEqual(
             [item["name"] for item in result["queue_items"]],
             ["one", "three"],
+        )
+
+    def test_move_returns_versioned_queue_and_rejects_stale_version(self) -> None:
+        music = _FakeMusic()
+        for name in ("one", "two", "three"):
+            music.queue.add_to_queue({"name": name, "artists": "artist"})
+        version = music.queue.get_version()
+
+        moved = bridge._move_queue_item(music, "area", 1, 3, version)
+        conflict = bridge._move_queue_item(music, "area", 1, 2, version)
+
+        self.assertEqual([item["name"] for item in moved["queue_all"]], ["two", "three", "one"])
+        self.assertEqual(moved["queue_version"], version + 1)
+        self.assertEqual(conflict["code"], "queue_conflict")
+        self.assertEqual(conflict["actual_version"], version + 1)
+        self.assertEqual(conflict["queue"], conflict["queue_all"])
+
+    def test_stale_delete_and_clear_do_not_mutate_newer_queue(self) -> None:
+        music = _FakeMusic()
+        for name in ("one", "two", "three"):
+            music.queue.add_to_queue({"name": name, "artists": "artist"})
+        stale = music.queue.get_version()
+        music.queue.add_to_queue({"name": "four", "artists": "artist"})
+
+        removed = bridge._remove_queue_items(music, "area", [2], stale)
+        cleared = bridge._clear_queue_items(music, "area", stale)
+
+        self.assertEqual(removed["code"], "queue_conflict")
+        self.assertEqual(cleared["code"], "queue_conflict")
+        self.assertEqual(
+            [item["name"] for item in music.queue.get_queue()],
+            ["one", "two", "three", "four"],
         )
 
     def test_remove_positions_supports_legacy_redis_queue(self) -> None:
@@ -259,6 +479,26 @@ class QueuePanelTests(unittest.TestCase):
         self.assertTrue(result["playing"])
         self.assertGreaterEqual(result["progress"], 11)
         self.assertEqual(result["duration"], 180)
+
+    def test_diagnostic_write_failure_does_not_change_command_result(self) -> None:
+        music = _FakeMusic()
+        previous_dependency = bridge._music_dependency
+        bridge._music_dependency = music
+        try:
+            with patch.object(
+                bridge,
+                "_command_config",
+                return_value=("area", "text", "voice", "bot"),
+            ), patch.object(
+                bridge.operations,
+                "record_command_timing",
+                side_effect=OSError("read-only diagnostics"),
+            ):
+                result = bridge._execute_command("面板", "group:user")
+        finally:
+            bridge._music_dependency = previous_dependency
+
+        self.assertTrue(result["ok"])
 
 
 class SearchResultTests(unittest.TestCase):

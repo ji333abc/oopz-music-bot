@@ -123,6 +123,7 @@ def run(env_file: str | None = None) -> int:
     )
     from .qqmusic_service import ManagedQQMusicService
     from .runtime import OopzRuntime
+    from .state_publisher import state_publisher
 
     clear_settings_cache()
     settings = get_settings()
@@ -207,6 +208,7 @@ def run(env_file: str | None = None) -> int:
 
     def shutdown(*_args) -> None:
         server.should_exit = True
+        state_publisher.close()
         if refresh_service is not None:
             refresh_service.stop()
         if legacy_core_enabled:

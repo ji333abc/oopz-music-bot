@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import threading
 import time
 import uuid
@@ -195,7 +194,7 @@ class PlaybackMixin:
                                 if not ch:
                                     logger.warning("自动播放: 未获取到语音频道，歌曲保留在队列")
                                     try:
-                                        self.queue.redis.lpush(self.queue._qkey(), json.dumps(next_song, ensure_ascii=False))
+                                        self.queue.add_to_front(next_song)
                                     except Exception as e:
                                         logger.error(f"自动播放回退入队失败，歌曲可能丢失: {e}")
                                     if wait_or_stop(2):

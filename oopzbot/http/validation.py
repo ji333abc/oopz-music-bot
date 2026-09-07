@@ -25,6 +25,16 @@ def command_request_from_http(
     requester_id = str(body.get("requester_id") or "anonymous").strip()
     requester_name = str(body.get("requester_name") or requester_id).strip()
     group_openid = str(body.get("group_openid") or "unknown-group").strip()
+    expected_version = body.get("expected_version")
+    if expected_version is not None:
+        if isinstance(expected_version, bool):
+            raise CommandInputError("队列版本无效")
+        try:
+            expected_version = int(expected_version)
+        except (TypeError, ValueError) as exc:
+            raise CommandInputError("队列版本无效") from exc
+        if expected_version < 0:
+            raise CommandInputError("队列版本无效")
     return CommandRequest(
         command=command,
         requester_id=requester_id,
@@ -32,4 +42,5 @@ def command_request_from_http(
         group_openid=group_openid,
         source="http",
         command_id=command_id,
+        expected_version=expected_version,
     )

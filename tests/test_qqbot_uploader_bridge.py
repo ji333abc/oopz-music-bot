@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import importlib
 import sys
-import tempfile
 import time
 import types
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 
@@ -241,150 +239,8 @@ class JMCommandParserTests(unittest.TestCase):
         self.assertEqual(service._parse_jm_album_ids("播放 111111"), [])
         self.assertEqual(service._parse_jm_album_ids("JM 123,456"), [])
 
-    def test_jm_children_receive_only_required_application_secrets(self) -> None:
-        with patch.dict(
-            service.os.environ,
-            {
-                "PATH": "test-path",
-                "QQBOT_APP_ID": "app-id",
-                "QQBOT_APP_SECRET": "app-secret",
-                "QQBOT_JM_MAX_BYTES": "123",
-                "QQBOT_JM_TEMP_ROOT": "/tmp/jm",
-                "OOPZ_JWT_TOKEN": "must-not-leak",
-                "OOPZ_PANEL_PASSWORD": "must-not-leak",
-                "RACKNERD_API_HASH": "must-not-leak",
-            },
-            clear=True,
-        ):
-            worker = service._jm_worker_environment("zip-password")
-            uploader = service._jm_uploader_environment()
-
-        self.assertEqual(worker["JM_ZIP_PASSWORD"], "zip-password")
-        self.assertEqual(worker["QQBOT_JM_MAX_BYTES"], "123")
-        self.assertNotIn("QQBOT_APP_SECRET", worker)
-        self.assertEqual(uploader["QQBOT_APP_SECRET"], "app-secret")
-        self.assertEqual(uploader["QQBOT_JM_TEMP_ROOT"], "/tmp/jm")
-        for secret in ("OOPZ_JWT_TOKEN", "OOPZ_PANEL_PASSWORD", "RACKNERD_API_HASH"):
-            self.assertNotIn(secret, worker)
-            self.assertNotIn(secret, uploader)
 
 
-class UploadBridgeTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self) -> None:
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp_dir.name)
-        self.archive = self.root / "JM123.zip"
-        self.archive.write_bytes(b"zip-test")
-        self.original_node = service.JM_NODE
-        self.original_uploader = service.JM_UPLOADER
-        self.original_timeout = service.JM_UPLOAD_TIMEOUT_SECONDS
-        service.JM_NODE = sys.executable
-
-    async def asyncTearDown(self) -> None:
-        service.JM_NODE = self.original_node
-        service.JM_UPLOADER = self.original_uploader
-        service.JM_UPLOAD_TIMEOUT_SECONDS = self.original_timeout
-        self.temp_dir.cleanup()
-
-    def _write_fake_uploader(self, body: str) -> None:
-        script = self.root / "fake_uploader.py"
-        script.write_text(body, encoding="utf-8")
-        service.JM_UPLOADER = str(script)
-
-    async def test_success_result_is_returned(self) -> None:
-        payload = {"ok": True, "fileUuid": "uuid-1", "ttl": 60}
-        self._write_fake_uploader(
-            "import json, sys\n"
-            "print('progress 1/1', file=sys.stderr)\n"
-            f"print(json.dumps({payload!r}))\n"
-        )
-
-        result = await service._run_jm_upload(
-            self.archive,
-            "group-1",
-            "message-1",
-            "JM123.zip",
-        )
-
-        self.assertEqual(result, payload)
-
-    async def test_structured_failure_becomes_upload_error(self) -> None:
-        payload = {
-            "ok": False,
-            "errorType": "quota",
-            "message": "daily limit",
-        }
-        self._write_fake_uploader(
-            "import json, sys\n"
-            f"print(json.dumps({payload!r}))\n"
-            "sys.exit(1)\n"
-        )
-
-        with self.assertRaises(service.JMUploadError) as raised:
-            await service._run_jm_upload(
-                self.archive,
-                "group-1",
-                "message-1",
-                "JM123.zip",
-            )
-
-        self.assertEqual(raised.exception.error_type, "quota")
-
-    async def test_timeout_kills_uploader(self) -> None:
-        self._write_fake_uploader("import time\ntime.sleep(10)\n")
-        service.JM_UPLOAD_TIMEOUT_SECONDS = 0.05
-
-        with self.assertRaises(service.JMUploadError) as raised:
-            await service._run_jm_upload(
-                self.archive,
-                "group-1",
-                "message-1",
-                "JM123.zip",
-            )
-
-        self.assertEqual(raised.exception.error_type, "timeout")
-
-
-class JMEstimateTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.original_timing_path = service.JM_TIMING_PATH
-        service.JM_TIMING_PATH = Path(self.temp_dir.name) / "jm_timing.json"
-
-    def tearDown(self) -> None:
-        service.JM_TIMING_PATH = self.original_timing_path
-        self.temp_dir.cleanup()
-
-    def test_default_estimate_is_rounded_up(self) -> None:
-        self.assertEqual(service._estimate_jm_seconds(410), 260)
-
-    def test_completed_job_calibrates_future_estimates(self) -> None:
-        service._record_jm_timing(
-            {
-                "page_count": 100,
-                "download_seconds": 10,
-                "processing_seconds": 20,
-                "upload_seconds": 5,
-                "archive_bytes": 10 * 1024 * 1024,
-                "total_seconds": 35.5,
-            }
-        )
-
-        self.assertEqual(service._estimate_jm_seconds(200), 110)
-
-    def test_small_sample_only_partially_reweights_defaults(self) -> None:
-        service._record_jm_timing(
-            {
-                "page_count": 20,
-                "download_seconds": 11.829,
-                "processing_seconds": 3.409,
-                "upload_seconds": 9.431,
-                "archive_bytes": 10_341_819,
-                "total_seconds": 25.067,
-            }
-        )
-
-        self.assertEqual(service._estimate_jm_seconds(20), 30)
 
 
 if __name__ == "__main__":

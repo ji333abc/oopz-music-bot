@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import os
-import shutil
 import time
 from datetime import UTC, datetime
-from pathlib import Path
 
 import requests
 
@@ -179,22 +177,16 @@ def service_health(music) -> dict[str, dict]:
 
     jm_enabled = _env("QQBOT_JM_ENABLED").lower() in {"1", "true", "yes", "on"}
     if not jm_enabled:
-        components["uploader"] = health_entry("offline", "JM 未启用")
+        components["jm_worker"] = health_entry("offline", "JM 未启用")
     else:
-        project_root = Path(__file__).resolve().parents[1]
-        uploader = Path(
-            _env("QQBOT_JM_UPLOADER")
-            or project_root / "tools" / "qqbot-uploader" / "uploader.mjs"
-        )
-        node = _env("QQBOT_JM_NODE") or "node"
-        sdk = uploader.parent / "node_modules" / "@tencent-connect" / "qqbot-nodejs"
-        ready = (
-            uploader.is_file()
-            and (Path(node).is_file() or shutil.which(node))
-            and sdk.is_dir()
-        )
-        components["uploader"] = health_entry(
+        from .jm.queue import RedisJMQueue
+
+        try:
+            ready = RedisJMQueue().available()
+        except Exception:
+            ready = False
+        components["jm_worker"] = health_entry(
             "ok" if ready else "error",
-            "QQ 分片上传器就绪" if ready else "上传器或依赖缺失",
+            "JM worker 心跳正常" if ready else "JM worker 未启动或心跳已过期",
         )
     return components

@@ -10,6 +10,7 @@ import logging
 import requests
 
 from .config import Settings, get_settings
+from .metrics import metrics
 from .qqmusic_credential import current_cookie
 
 logger = logging.getLogger("QQMusic")
@@ -51,8 +52,16 @@ class QQMusic:
         return quality if quality in _SUPPORTED_QUALITIES else default
 
     def _get(self, path: str, params: dict | None = None) -> dict | None:
+        timer = metrics.timer()
         if not self.base_url:
             self.last_error = {"type": "config", "message": "QQ音乐接口未配置"}
+            metrics.record_external(
+                service="qqmusic",
+                operation=path,
+                result_kind="config",
+                ok=False,
+                duration_ms=timer.elapsed_ms(),
+            )
             return None
         self.last_error = None
         try:
@@ -67,21 +76,46 @@ class QQMusic:
                 timeout=HTTP_TIMEOUT_DEFAULT,
             )
             response.raise_for_status()
-            return response.json()
+            try:
+                payload = response.json()
+            except ValueError:
+                self.last_error = {
+                    "type": "parse_error",
+                    "message": "QQ音乐接口返回格式异常，请稍后重试",
+                }
+                metrics.record_external(
+                    service="qqmusic", operation=path, result_kind="parse_error",
+                    ok=False, duration_ms=timer.elapsed_ms(),
+                )
+                return None
+            metrics.record_external(
+                service="qqmusic", operation=path, result_kind="ok",
+                ok=True, duration_ms=timer.elapsed_ms(),
+            )
+            return payload
         except requests.Timeout:
             self.last_error = {
                 "type": "timeout",
                 "message": "QQ音乐接口请求超时，请稍后重试",
             }
             logger.error("QQ 音乐 API 请求超时: path=%s", path)
+            metrics.record_external(
+                service="qqmusic", operation=path, result_kind="timeout",
+                ok=False, duration_ms=timer.elapsed_ms(),
+            )
             return None
         except requests.HTTPError as exc:
             status = getattr(getattr(exc, "response", None), "status_code", "unknown")
+            result_kind = "cookie_invalid" if status in {401, 403} else "upstream_http"
             self.last_error = {
-                "type": "http",
+                "type": result_kind,
                 "message": f"QQ音乐接口异常（HTTP {status}），请稍后重试",
             }
             logger.error("QQ 音乐 API HTTP 异常: path=%s status=%s", path, status)
+            metrics.record_external(
+                service="qqmusic", operation=path, result_kind=result_kind,
+                ok=False, duration_ms=timer.elapsed_ms(),
+            )
             return None
         except Exception as exc:
             self.last_error = {
@@ -89,6 +123,10 @@ class QQMusic:
                 "message": "QQ音乐接口连接失败，请稍后重试",
             }
             logger.error("QQ 音乐 API 请求失败: %s", exc)
+            metrics.record_external(
+                service="qqmusic", operation=path, result_kind="network",
+                ok=False, duration_ms=timer.elapsed_ms(),
+            )
             return None
 
     @staticmethod
@@ -149,6 +187,73 @@ class QQMusic:
             if (parsed := self._parse_song(song)) is not None
         ]
 
+    def search_albums(self, keyword: str, limit: int = 5) -> list[dict]:
+        """Search albums through Smartbox, which exposes album mids reliably."""
+        data = self._get("/getSmartbox", params={"key": keyword}) or {}
+        response = data.get("response") or {}
+        response_payload = (
+            response.get("data") or response
+            if isinstance(response, dict)
+            else {}
+        )
+        top_level_payload = data.get("data") or {}
+        payload = response_payload if isinstance(response_payload, dict) else {}
+        if not payload and isinstance(top_level_payload, dict):
+            payload = top_level_payload
+        album_payload = payload.get("album") or {}
+        if not isinstance(album_payload, dict):
+            return []
+        albums = (
+            album_payload.get("itemlist")
+            or album_payload.get("itemList")
+            or album_payload.get("list")
+            or []
+        )
+        results: list[dict] = []
+        for raw in albums:
+            if not isinstance(raw, dict):
+                continue
+            album_mid = raw.get("mid") or raw.get("id") or raw.get("docid")
+            if not album_mid:
+                continue
+            results.append(
+                {
+                    "id": str(album_mid),
+                    "mid": str(album_mid),
+                    "name": str(raw.get("name") or "未知专辑"),
+                    "artists": str(raw.get("singer") or "未知歌手"),
+                    "cover": str(raw.get("pic") or ""),
+                }
+            )
+            if len(results) >= max(1, int(limit)):
+                break
+        return results
+
+    def get_album(self, album_mid: str) -> dict | None:
+        """Return normalized album metadata and tracks without play URLs."""
+        response = self._get("/getAlbumInfo", params={"albummid": album_mid}) or {}
+        data = response.get("data") or (response.get("response") or {}).get("data") or {}
+        if not isinstance(data, dict):
+            return None
+        tracks = [
+            parsed
+            for raw in (data.get("list") or [])
+            if isinstance(raw, dict) and (parsed := self._parse_song(raw)) is not None
+        ]
+        if not tracks:
+            return None
+        resolved_mid = str(data.get("mid") or data.get("albummid") or album_mid)
+        return {
+            "id": resolved_mid,
+            "mid": resolved_mid,
+            "name": str(data.get("name") or tracks[0].get("album") or "未知专辑"),
+            "artists": str(data.get("singername") or tracks[0].get("artists") or "未知歌手"),
+            "release_date": str(data.get("aDate") or ""),
+            "cover": _ALBUM_COVER_URL.format(mid=resolved_mid),
+            "track_count": len(tracks),
+            "tracks": tracks,
+        }
+
     @staticmethod
     def _extract_play_url(data: dict, song_id: str) -> str:
         """从新旧版本播放接口响应中提取播放地址。"""
@@ -177,6 +282,7 @@ class QQMusic:
         return str(url) if url else ""
 
     def get_song_url(self, song_id, quality: str | None = None, **_ignored) -> str | None:
+        operation_timer = metrics.timer()
         song_id = str(song_id)
         selected_quality = self._normalize_quality(
             quality,
@@ -197,12 +303,32 @@ class QQMusic:
             )
             url = self._extract_play_url(data or {}, song_id)
             if url:
+                metrics.record_external(
+                    service="qqmusic", operation="playability", result_kind="playable",
+                    ok=True, duration_ms=operation_timer.elapsed_ms(),
+                )
                 return url
 
         # Both supported QQ Music API services expose /getMusicPlay.  Do not
         # probe the obsolete /song/url route: it returns 404 on current APIs
         # and obscures the real reason when QQ marks a track unplayable.
+        result_kind = "dependency_error" if getattr(self, "last_error", None) else "unplayable"
+        metrics.record_external(
+            service="qqmusic", operation="playability", result_kind=result_kind,
+            ok=False, duration_ms=operation_timer.elapsed_ms(),
+        )
         return None
+
+    def diagnostics(self) -> dict:
+        return {
+            "service": "qqmusic",
+            "last_error": dict(self.last_error or {}),
+            "endpoints": {
+                key: value
+                for key, value in metrics.summaries().items()
+                if key.startswith("qqmusic:")
+            },
+        }
 
     def get_fallback_song_url(self, song_id) -> str | None:
         """获取 Python 本地下载使用的低码率备用链接。"""
@@ -320,6 +446,7 @@ class QQMusic:
             "name": song.get("songname") or song.get("name") or "未知歌曲",
             "artists": artists,
             "album": album_name,
+            "album_mid": album_mid,
             "duration": duration_s * 1000,
             "durationText": f"{duration_s // 60}:{duration_s % 60:02d}",
             "cover": cover,

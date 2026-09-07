@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import asyncio
 import importlib
 import os
 import sys
-import tempfile
 import types
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 import requests
@@ -95,75 +92,6 @@ class QQMusicFailureTests(unittest.TestCase):
         self.assertIn("HTTP 401", result["message"])
 
 
-class JMFailureTests(unittest.IsolatedAsyncioTestCase):
-    async def test_download_failure_releases_the_task_lock(self) -> None:
-        original_root = qqbot.JM_TEMP_ROOT
-        with tempfile.TemporaryDirectory() as temporary:
-            qqbot.JM_TEMP_ROOT = Path(temporary)
-            acquired = qqbot._jm_job_lock.acquire(blocking=False)
-            self.assertTrue(acquired)
-            try:
-                result = await qqbot.OopzQQClient._run_jm_job(
-                    object.__new__(qqbot.OopzQQClient),
-                    types.SimpleNamespace(group_openid="group", id="message"),
-                    "123456",
-                    send_result=False,
-                )
-            finally:
-                # The job itself must release the lock; this fallback only protects the test.
-                if qqbot._jm_job_lock.locked():
-                    qqbot._jm_job_lock.release()
-                qqbot.JM_TEMP_ROOT = original_root
-
-        self.assertFalse(result["ok"])
-        self.assertTrue(qqbot._jm_job_lock.acquire(blocking=False))
-        qqbot._jm_job_lock.release()
-
-    async def test_oversized_archive_releases_lock_and_returns_structured_error(self) -> None:
-        original_root = qqbot.JM_TEMP_ROOT
-        original_limit = qqbot.JM_MAX_BYTES
-        original_retain = qqbot.JM_FAILURE_RETAIN_SECONDS
-        with tempfile.TemporaryDirectory() as temporary:
-            qqbot.JM_TEMP_ROOT = Path(temporary)
-            qqbot.JM_MAX_BYTES = 1
-            qqbot.JM_FAILURE_RETAIN_SECONDS = 0
-
-            def oversized_download(_album_id, _password, job_dir):
-                job_dir.mkdir(parents=True)
-                archive = job_dir / "archive.zip"
-                archive.write_bytes(b"too-large")
-                return archive, {"page_count": 1}
-
-            qqbot._run_jm_download = oversized_download
-            self.assertTrue(qqbot._jm_job_lock.acquire(blocking=False))
-            try:
-                result = await qqbot.OopzQQClient._run_jm_job(
-                    object.__new__(qqbot.OopzQQClient),
-                    types.SimpleNamespace(group_openid="group", id="message"),
-                    "123456",
-                    send_result=False,
-                )
-                await asyncio.sleep(0.01)
-            finally:
-                if qqbot._jm_job_lock.locked():
-                    qqbot._jm_job_lock.release()
-                qqbot.JM_TEMP_ROOT = original_root
-                qqbot.JM_MAX_BYTES = original_limit
-                qqbot.JM_FAILURE_RETAIN_SECONDS = original_retain
-
-        self.assertFalse(result["ok"])
-        self.assertIn("超过", result["error"])
-        self.assertTrue(qqbot._jm_job_lock.acquire(blocking=False))
-        qqbot._jm_job_lock.release()
-
-    async def asyncSetUp(self) -> None:
-        self.download = qqbot._run_jm_download
-        qqbot._run_jm_download = lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            RuntimeError("fake download failed")
-        )
-
-    async def asyncTearDown(self) -> None:
-        qqbot._run_jm_download = self.download
 
 
 class OopzFailureTests(unittest.TestCase):

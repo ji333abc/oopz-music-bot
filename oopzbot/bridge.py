@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
 from threading import Lock
@@ -15,7 +16,7 @@ import requests
 from . import health as _health
 from .application.command_service import CommandService
 from .application.playback_service import PlaybackService
-from .application.queue_service import QueuePositionError, QueueService
+from .application.queue_service import QueueConflictError, QueuePositionError, QueueService
 from .commands.formatter import format_queue, format_search, format_seconds
 from .commands.oopz import backend_notifies as _oopz_backend_notifies
 from .commands.oopz import normalize_oopz_music_command as _modern_oopz_music_command
@@ -35,20 +36,32 @@ from .domain.compat import (
     display_song_from_legacy,
     queue_item_to_legacy,
 )
-from .domain.contracts import CommandRequest, PlaybackState
+from .domain.contracts import CommandRequest, PlaybackState, QueueItem, SongCandidate
 from .http.routes import create_bridge_router
 from .infrastructure.queue_adapter import LegacyQueueAdapter
+from .metrics import CommandTiming, FailureRecord, PlaybackHistoryItem, metrics, utc_now
 from .observability import current_command_id, ensure_command_id, redact_secrets
 from .operations import operations
+from .qqmusic_credential import credential_status
+from .state_publisher import state_publisher
 
 logger = logging.getLogger("QQBotBridge")
 _music_dependency = None
+_album_provider_dependency = None
 
 _command_lock = Lock()
 _SEARCH_SESSION_TTL_SECONDS = 300
 _RANK_SESSION_TTL_SECONDS = 300
 _search_sessions = ExpiringSessionStore(_SEARCH_SESSION_TTL_SECONDS)
 _rank_sessions = ExpiringSessionStore(_RANK_SESSION_TTL_SECONDS)
+_album_sessions = ExpiringSessionStore(_SEARCH_SESSION_TTL_SECONDS)
+
+
+def _record_diagnostic(recorder, value) -> None:
+    try:
+        recorder(value)
+    except Exception as exc:
+        logger.warning("写入诊断记录失败，不影响业务结果: %s", type(exc).__name__)
 
 _QQ_RANKS = (
     (26, "巅峰榜·热歌"),
@@ -100,6 +113,13 @@ _HELP_MESSAGE = """Music-bot 使用帮助
 ├─ 榜单点歌 <编号>
 └─ 榜单批量 10 —— 前10首加入队列
 
+💿 专辑点歌（需启用）
+├─ 专辑 <专辑名>
+├─ 专辑选择 <编号>
+├─ 专辑点歌 <曲目编号>
+├─ 专辑加入 全部 / 前N首 / N-M / N N ...
+└─ 取消专辑
+
 👥 OOPZ频道
 ├─ 在线 —— 显示所有语音频道及成员
 └─ 有谁 —— 查看 Music 频道成员
@@ -149,11 +169,33 @@ def _notify_music(music, *, text: str, channel: str, area: str, **kwargs) -> boo
     """Send an OOPZ notification without failing the already-started action."""
     notifier = getattr(music, "notify_message", None)
     if callable(notifier):
-        return bool(notifier(text=text, channel=channel, area=area, **kwargs))
+        sent = bool(notifier(text=text, channel=channel, area=area, **kwargs))
+        if not sent:
+            _record_diagnostic(
+                operations.record_failure,
+                FailureRecord(
+                    component="notification",
+                    error_kind="notification_failure",
+                    message="OOPZ 播放通知发送失败，播放状态保持成功",
+                    command_id=current_command_id() or "",
+                    created_at=utc_now(),
+                ),
+            )
+        return sent
     try:
         music.sender.send_message(text=text, channel=channel, area=area, **kwargs)
     except Exception as exc:
         logger.warning("OOPZ 文字消息发送失败，继续执行: %s", exc)
+        _record_diagnostic(
+            operations.record_failure,
+            FailureRecord(
+                component="notification",
+                error_kind="notification_failure",
+                message=redact_secrets(str(exc), max_length=240),
+                command_id=current_command_id() or "",
+                created_at=utc_now(),
+            ),
+        )
         return False
     return True
 
@@ -508,6 +550,28 @@ def _music_handler():
 def set_music_handler(handler) -> None:
     global _music_dependency
     _music_dependency = handler
+
+
+def set_album_provider(provider) -> None:
+    """Inject an album provider for tests or an alternative QQ Music backend."""
+    global _album_provider_dependency
+    _album_provider_dependency = provider
+
+
+def _album_provider(music):
+    global _album_provider_dependency
+    if _album_provider_dependency is not None:
+        return _album_provider_dependency
+    candidate = getattr(music, "platforms", {}).get("qq")
+    if candidate and all(
+        callable(getattr(candidate, name, None))
+        for name in ("search_albums", "get_album")
+    ):
+        return candidate
+    from .music import QQMusic
+
+    _album_provider_dependency = QQMusic(get_settings())
+    return _album_provider_dependency
 
 
 def _command_config(request: CommandRequest | None = None) -> tuple[str, str, str, str]:
@@ -897,17 +961,66 @@ def _queue_panel(music, area: str, notice: str = "") -> dict:
             for index, song in enumerate(pending, 1)
         ],
         "queue_length": len(pending),
+        "queue_version": snapshot.version,
     }
+
+
+def _move_queue_item(
+    music,
+    area: str,
+    source: int,
+    target: int,
+    expected_version: int | None = None,
+) -> dict:
+    queue = _queue_service(music, area)
+    try:
+        snapshot = queue.move(source, target, expected_version)
+    except QueueConflictError as exc:
+        latest = _queue_panel(music, area)
+        return {
+            "ok": False,
+            "code": "queue_conflict",
+            "message": "队列已被其他操作更新，请确认最新顺序后重试",
+            "expected_version": expected_version,
+            "actual_version": exc.actual_version,
+            "queue": latest["queue_all"],
+            "queue_all": latest["queue_all"],
+            "queue_version": latest["queue_version"],
+        }
+    except QueuePositionError as exc:
+        if not exc.length:
+            return {"ok": False, "message": "待播队列为空，没有可移动的歌曲"}
+        return {"ok": False, "message": f"编号超出范围，请输入 1-{exc.length}"}
+    result = _queue_panel(music, area, f"已将第 {source} 首移动到第 {target} 首")
+    result["queue_version"] = snapshot.version
+    return result
 
 
 def _parse_queue_positions(value: str) -> list[int] | None:
     return parse_queue_positions(value)
 
 
-def _remove_queue_items(music, area: str, positions: list[int]) -> dict:
+def _remove_queue_items(
+    music,
+    area: str,
+    positions: list[int],
+    expected_version: int | None = None,
+) -> dict:
     queue = _queue_service(music, area)
     try:
-        removed = queue.remove(positions)
+        removed = queue.remove(positions, expected_version)
+    except QueueConflictError as exc:
+        latest = _queue_panel(music, area)
+        return {
+            "ok": False,
+            "code": "queue_conflict",
+            "message": "队列已被其他操作更新，请确认最新顺序后重试",
+            "expected_version": expected_version,
+            "actual_version": exc.actual_version,
+            "queue": latest["queue_all"],
+            "queue_all": latest["queue_all"],
+            "queue_version": latest["queue_version"],
+        }
     except QueuePositionError as exc:
         length = exc.length
         if not length:
@@ -916,6 +1029,27 @@ def _remove_queue_items(music, area: str, positions: list[int]) -> dict:
 
     names = "、".join(song.song.name for song in removed)
     return _queue_panel(music, area, f"已删除 {len(removed)} 首：{names}")
+
+
+def _clear_queue_items(
+    music, area: str, expected_version: int | None = None
+) -> dict:
+    queue = _queue_service(music, area)
+    try:
+        queue.clear_pending(expected_version)
+    except QueueConflictError as exc:
+        latest = _queue_panel(music, area)
+        return {
+            "ok": False,
+            "code": "queue_conflict",
+            "message": "队列已被其他操作更新，请确认最新顺序后重试",
+            "expected_version": expected_version,
+            "actual_version": exc.actual_version,
+            "queue": latest["queue_all"],
+            "queue_all": latest["queue_all"],
+            "queue_version": latest["queue_version"],
+        }
+    return _queue_panel(music, area, "待播队列已清空")
 
 
 def _search_keyword(command: str) -> str:
@@ -996,6 +1130,333 @@ def _select_song(
     }
 
 
+def _album_payload(album: dict, index: int | None = None) -> dict:
+    payload = {
+        "id": str(album.get("id") or album.get("mid") or ""),
+        "name": str(album.get("name") or "未知专辑"),
+        "artists": str(album.get("artists") or "未知歌手"),
+        "cover": str(album.get("cover") or ""),
+        "release_date": str(album.get("release_date") or ""),
+        "track_count": int(album.get("track_count") or 0),
+    }
+    if index is not None:
+        payload["index"] = index
+    return payload
+
+
+def _album_enabled() -> bool:
+    return bool(get_settings().album_request_enabled)
+
+
+def _search_albums(music, keyword: str, requester_key: str) -> dict:
+    if not keyword:
+        return {"ok": False, "message": "请输入专辑名，例如：专辑 叶惠美"}
+    if len(keyword) > 100:
+        return {"ok": False, "message": "专辑关键词过长"}
+    provider = _album_provider(music)
+    try:
+        albums = list(provider.search_albums(keyword, limit=5))
+    except Exception as exc:
+        logger.warning("QQ音乐专辑搜索失败: %s", exc)
+        albums = []
+    if not albums:
+        return {"ok": False, "message": f"QQ音乐未找到专辑：{keyword}"}
+    settings = get_settings()
+    _album_sessions.ttl_seconds = settings.album_request_session_ttl_seconds
+    _album_sessions.put(requester_key, albums=albums[:5], keyword=keyword)
+    ttl_seconds = int(settings.album_request_session_ttl_seconds)
+    ttl_text = (
+        f"{ttl_seconds // 60}分钟"
+        if ttl_seconds % 60 == 0
+        else f"{ttl_seconds}秒"
+    )
+    lines = [f"专辑搜索：{keyword}"]
+    lines.extend(
+        f"{index}. {album.get('name', '未知专辑')} - "
+        f"{album.get('artists', '未知歌手')}"
+        for index, album in enumerate(albums[:5], 1)
+    )
+    lines.append(f"{ttl_text}内发送：专辑选择 <编号>")
+    return {
+        "ok": True,
+        "reply_type": "album_search_results",
+        "message": "\n".join(lines),
+        "albums": [
+            _album_payload(album, index)
+            for index, album in enumerate(albums[:5], 1)
+        ],
+    }
+
+
+def _album_detail_result(session: dict, page: int = 1) -> dict:
+    album = session.get("album") or {}
+    tracks = list(session.get("tracks") or [])
+    per_page = 10
+    total_pages = max(1, (len(tracks) + per_page - 1) // per_page)
+    page = max(1, min(int(page), total_pages))
+    start = (page - 1) * per_page
+    visible = tracks[start : start + per_page]
+    lines = [
+        f"{album.get('name', '未知专辑')} - {album.get('artists', '未知歌手')}",
+        f"曲目 {len(tracks)} 首 · 第 {page}/{total_pages} 页",
+    ]
+    lines.extend(
+        f"{index}. {song.get('name', '未知歌曲')} - "
+        f"{song.get('artists', '未知歌手')}"
+        for index, song in enumerate(visible, start + 1)
+    )
+    lines.append("发送：专辑点歌 <编号>，或 专辑加入 全部/前N首/N-M/N N ...")
+    return {
+        "ok": True,
+        "reply_type": "album_detail",
+        "message": "\n".join(lines),
+        "album": _album_payload(album),
+        "tracks": [
+            _qq_song_payload(song, index)
+            for index, song in enumerate(visible, start + 1)
+        ],
+        "page": page,
+        "total_pages": total_pages,
+    }
+
+
+def _select_album(music, index: int, requester_key: str) -> dict:
+    session = _album_sessions.get_active(requester_key)
+    if not session or not session.get("albums"):
+        return {"ok": False, "message": "专辑搜索结果已失效，请重新发送：专辑 <专辑名>"}
+    albums = list(session.get("albums") or [])
+    if index < 1 or index > len(albums):
+        return {"ok": False, "message": f"编号无效，请输入 1-{len(albums)}"}
+    provider = _album_provider(music)
+    selected = albums[index - 1]
+    album_id = str(selected.get("id") or selected.get("mid") or "")
+    try:
+        album = provider.get_album(album_id)
+    except Exception as exc:
+        logger.warning("QQ音乐专辑详情读取失败: %s", exc)
+        album = None
+    if not album:
+        return {"ok": False, "message": "暂时无法读取该专辑曲目，请稍后重试"}
+    normalized = {**selected, **album}
+    tracks = [dict(song, platform="qq") for song in (album.get("tracks") or [])]
+    if not tracks:
+        return {"ok": False, "message": "该专辑没有可用曲目"}
+    _album_sessions.put(
+        requester_key,
+        albums=albums,
+        album=normalized,
+        tracks=tracks,
+        keyword=session.get("keyword", ""),
+    )
+    return _album_detail_result(_album_sessions.get_active(requester_key) or {})
+
+
+def _album_tracks_page(requester_key: str, page: int) -> dict:
+    session = _album_sessions.get_active(requester_key)
+    if not session or not session.get("tracks"):
+        return {"ok": False, "message": "尚未选择专辑，请先发送：专辑 <专辑名>"}
+    return _album_detail_result(session, page)
+
+
+def _ensure_album_voice(music, area: str, voice_channel: str) -> dict | None:
+    if (
+        getattr(music, "_voice_channel_id", None) == voice_channel
+        and getattr(music, "_voice_channel_area", None) == area
+    ):
+        return None
+    result = music.enter_voice_channel(voice_channel, area)
+    if not isinstance(result, dict) or result.get("error"):
+        detail = result.get("error") if isinstance(result, dict) else "unknown"
+        return {"ok": False, "message": f"进入 Oopz 语音频道失败: {detail}"}
+    return None
+
+
+def _play_album_track(
+    music,
+    index: int,
+    requester_key: str,
+    area: str,
+    text_channel: str,
+    voice_channel: str,
+    bot_user: str,
+) -> dict:
+    session = _album_sessions.get_active(requester_key)
+    if not session or not session.get("tracks"):
+        return {"ok": False, "message": "尚未选择专辑，请先发送：专辑 <专辑名>"}
+    tracks = list(session.get("tracks") or [])
+    if index < 1 or index > len(tracks):
+        return {"ok": False, "message": f"曲目编号无效，请输入 1-{len(tracks)}"}
+    if voice_error := _ensure_album_voice(music, area, voice_channel):
+        return voice_error
+    song = tracks[index - 1]
+    result = _playback_service(music).play_choice(
+        song,
+        channel=text_channel,
+        area=area,
+        requester_id=bot_user,
+    )
+    if not result.ok:
+        return {
+            "ok": False,
+            "message": result.message,
+            "backend_notified": True,
+        }
+    _album_sessions.pop(requester_key, None)
+    return {
+        "ok": True,
+        "reply_type": "album_song_selected",
+        "message": f"已选择：{song.get('name', '未知歌曲')} - {song.get('artists', '未知歌手')}",
+        "song": _qq_song_payload(song),
+        "backend_notified": True,
+    }
+
+
+def _album_track_slice(tracks: list[dict], selection: str) -> list[dict] | None:
+    value = selection.strip()
+    compact = re.sub(r"\s+", "", value)
+    if compact in {"全部", "整张", "全选"}:
+        return tracks
+    front = re.fullmatch(r"前(\d+)首?", compact)
+    if front:
+        return tracks[: int(front.group(1))]
+    span = re.fullmatch(r"(\d+)(?:-|~|～|至|—)(\d+)", compact)
+    if span:
+        start, end = int(span.group(1)), int(span.group(2))
+        if start < 1 or end < start or end > len(tracks):
+            return None
+        return tracks[start - 1 : end]
+    if re.fullmatch(r"\d+(?:[\s,，、]+\d+)*", value):
+        positions = [int(item) for item in re.split(r"[\s,，、]+", value)]
+        if any(position < 1 or position > len(tracks) for position in positions):
+            return None
+        selected: list[dict] = []
+        seen: set[int] = set()
+        for position in positions:
+            if position not in seen:
+                selected.append(tracks[position - 1])
+                seen.add(position)
+        return selected
+    return None
+
+
+def _album_queue_item(
+    song: dict,
+    *,
+    album: dict,
+    track_number: int,
+    batch_id: str,
+    area: str,
+    channel: str,
+    requester_id: str,
+) -> QueueItem:
+    duration_ms = int(song.get("duration_ms") or song.get("duration") or 0)
+    candidate = SongCandidate(
+        song_id=str(song.get("id") or song.get("mid") or song.get("song_id") or ""),
+        name=str(song.get("name") or "未知歌曲"),
+        artists=str(song.get("artists") or "未知歌手"),
+        album=str(song.get("album") or album.get("name") or ""),
+        duration_ms=duration_ms,
+        duration_text=str(song.get("durationText") or ""),
+        cover=str(song.get("cover") or album.get("cover") or ""),
+        platform="qq",
+        url="",
+    )
+    return QueueItem(
+        song=candidate,
+        channel=channel,
+        area=area,
+        requester_id=requester_id,
+        extras={
+            "batch_id": batch_id,
+            "album_id": str(album.get("id") or album.get("mid") or ""),
+            "album_track_number": track_number,
+        },
+    )
+
+
+def _queue_album_tracks(
+    music,
+    selection: str,
+    requester_key: str,
+    area: str,
+    text_channel: str,
+    voice_channel: str,
+    bot_user: str,
+    expected_version: int | None = None,
+) -> dict:
+    session = _album_sessions.get_active(requester_key)
+    if not session or not session.get("tracks"):
+        return {"ok": False, "message": "尚未选择专辑，请先发送：专辑 <专辑名>"}
+    all_tracks = list(session.get("tracks") or [])
+    chosen = _album_track_slice(all_tracks, selection)
+    if chosen is None or not chosen:
+        return {
+            "ok": False,
+            "message": (
+                f"选择无效，请使用“全部”“前N首”“1-{len(all_tracks)}”"
+                "或空格分隔编号（如：1 3 5）"
+            ),
+        }
+    maximum = get_settings().album_request_max_tracks
+    if len(chosen) > maximum:
+        return {"ok": False, "message": f"单次最多加入 {maximum} 首，请缩小范围"}
+    if voice_error := _ensure_album_voice(music, area, voice_channel):
+        return voice_error
+
+    album = session.get("album") or {}
+    positions = {id(song): index for index, song in enumerate(all_tracks, 1)}
+    batch_id = str(uuid.uuid4())
+    items = [
+        _album_queue_item(
+            song,
+            album=album,
+            track_number=positions[id(song)],
+            batch_id=batch_id,
+            area=area,
+            channel=text_channel,
+            requester_id=bot_user,
+        )
+        for song in chosen
+    ]
+    queue = _queue_service(music, area)
+    before = queue.snapshot()
+    try:
+        queue.enqueue_many(items, expected_version)
+    except QueueConflictError as exc:
+        return {
+            "ok": False,
+            "code": "queue_conflict",
+            "message": "队列已被其他操作更新，请刷新后重试",
+            "expected_version": expected_version,
+            "actual_version": exc.actual_version,
+        }
+    playback_warning = ""
+    playback_started = before.current is not None
+    if before.current is None:
+        next_result = _playback_service(music).next(
+            channel=text_channel,
+            area=area,
+            requester_id=bot_user,
+        )
+        playback_started = next_result.ok
+        if not next_result.ok:
+            playback_warning = f"；未能开始播放：{next_result.message}"
+    after = queue.snapshot()
+    _album_sessions.pop(requester_key, None)
+    return {
+        "ok": True,
+        "reply_type": "album_batch_queued",
+        "message": (
+            f"已加入《{album.get('name', '未知专辑')}》{len(items)} 首；"
+            f"当前待播 {after.queue_length} 首{playback_warning}"
+        ),
+        "added_count": len(items),
+        "batch_id": batch_id,
+        "queue_version": after.version,
+        "playback_started": playback_started,
+    }
+
+
 def _execute_command_impl(request: CommandRequest) -> dict:
     with _command_lock:
         command = request.command
@@ -1034,6 +1495,9 @@ def _execute_command_impl(request: CommandRequest) -> dict:
                 **playback,
             }
 
+        if command in {"清空队列", "队列清空"}:
+            return _clear_queue_items(music, area, request.expected_version)
+
         queue_remove = re.fullmatch(
             r"(?:删除(?:队列)?|移除(?:队列)?|队列(?:删除|移除))\s+(.+)",
             command,
@@ -1042,7 +1506,19 @@ def _execute_command_impl(request: CommandRequest) -> dict:
             positions = _parse_queue_positions(queue_remove.group(1))
             if positions is None:
                 return {"ok": False, "message": "用法：删除 <编号...>，例如“删除 2 5”"}
-            return _remove_queue_items(music, area, positions)
+            return _remove_queue_items(
+                music, area, positions, request.expected_version
+            )
+
+        queue_move = re.fullmatch(r"(?:移动|队列移动)\s+(\d+)\s+(\d+)", command)
+        if queue_move:
+            return _move_queue_item(
+                music,
+                area,
+                int(queue_move.group(1)),
+                int(queue_move.group(2)),
+                request.expected_version,
+            )
 
         if command_kind is CommandKind.QUEUE:
             return _queue_panel(music, area)
@@ -1093,6 +1569,59 @@ def _execute_command_impl(request: CommandRequest) -> dict:
                 "ok": False,
                 "message": "未找到该榜单，请发送“排行榜”查看可用榜单",
             }
+
+        album_command = command in {"专辑", "取消专辑"} or command.startswith(
+            ("专辑 ", "专辑选择", "选专辑", "专辑曲目", "专辑点歌", "专辑加入")
+        )
+        if album_command and not _album_enabled():
+            return {"ok": False, "message": "专辑点歌模式尚未启用"}
+
+        if command == "取消专辑":
+            removed = _album_sessions.pop(requester_key, None)
+            return {
+                "ok": True,
+                "message": "已取消当前专辑选择" if removed else "当前没有待处理的专辑选择",
+            }
+
+        if command == "专辑":
+            return {"ok": False, "message": "请输入专辑名，例如：专辑 叶惠美"}
+
+        album_selection = re.fullmatch(r"(?:专辑选择|选专辑)\s*(\d+)", command)
+        if album_selection:
+            return _select_album(music, int(album_selection.group(1)), requester_key)
+
+        album_page = re.fullmatch(r"专辑曲目(?:\s+(\d+))?", command)
+        if album_page:
+            return _album_tracks_page(requester_key, int(album_page.group(1) or 1))
+
+        album_song = re.fullmatch(r"专辑点歌\s*(\d+)", command)
+        if album_song:
+            return _play_album_track(
+                music,
+                int(album_song.group(1)),
+                requester_key,
+                area,
+                text_channel,
+                voice_channel,
+                music_requester,
+            )
+
+        album_batch = re.fullmatch(r"专辑加入\s+(.+)", command)
+        if album_batch:
+            return _queue_album_tracks(
+                music,
+                album_batch.group(1),
+                requester_key,
+                area,
+                text_channel,
+                voice_channel,
+                music_requester,
+                request.expected_version,
+            )
+
+        album_query = re.fullmatch(r"专辑\s+(.+)", command)
+        if album_query:
+            return _search_albums(music, album_query.group(1).strip(), requester_key)
 
         search_value = _search_keyword(command)
         if matches_search_command(command):
@@ -1326,7 +1855,111 @@ def _execute_command(
 
 def _execute_request(request: CommandRequest):
     service = CommandService(_execute_command_impl, logger=logger)
-    return service.execute(request)
+    timer = metrics.timer()
+    stopped_item = None
+    if exact_command_kind(request.command) is CommandKind.STOP:
+        try:
+            music = _music_handler()
+            area = _command_config(request)[0]
+            if music is not None and area:
+                stopped_item = _queue_service(music, area).current()
+        except Exception:
+            stopped_item = None
+    try:
+        result = service.execute(request)
+    except Exception as exc:
+        duration = timer.elapsed_ms()
+        _record_diagnostic(
+            operations.record_command_timing,
+            CommandTiming(
+                command_id=request.command_id or "",
+                source=request.source,
+                kind=(exact_command_kind(request.command) or request.command.split(" ", 1)[0] or "unknown"),
+                ok=False,
+                error_kind=type(exc).__name__,
+                duration_ms=duration,
+                created_at=utc_now(),
+            ),
+        )
+        _record_diagnostic(
+            operations.record_failure,
+            FailureRecord(
+                component="command",
+                error_kind=type(exc).__name__,
+                message=redact_secrets(str(exc), max_length=240),
+                command_id=request.command_id or "",
+                created_at=utc_now(),
+            ),
+        )
+        raise
+
+    error_kind = result.error.kind.value if result.error else ""
+    _record_diagnostic(
+        operations.record_command_timing,
+        CommandTiming(
+            command_id=result.command_id or request.command_id or "",
+            source=request.source,
+            kind=str(exact_command_kind(request.command) or request.command.split(" ", 1)[0] or "unknown"),
+            ok=result.ok,
+            error_kind=error_kind,
+            duration_ms=timer.elapsed_ms(),
+            created_at=utc_now(),
+        ),
+    )
+    if not result.ok:
+        _record_diagnostic(
+            operations.record_failure,
+            FailureRecord(
+                component="command",
+                error_kind=error_kind or result.code or "unknown",
+                message=result.message,
+                command_id=result.command_id or request.command_id or "",
+                created_at=utc_now(),
+            ),
+        )
+    history_song = result.song
+    if history_song is None and result.ok and matches_play_command(request.command):
+        try:
+            music = _music_handler()
+            area = _command_config(request)[0]
+            snapshot = _queue_service(music, area).snapshot() if music and area else None
+            queued = snapshot.pending[-1] if snapshot and snapshot.pending else None
+            current = snapshot.current if snapshot else None
+            history_song = (queued or current).song if (queued or current) else None
+        except Exception:
+            history_song = None
+    if history_song is not None:
+        now = utc_now()
+        _record_diagnostic(
+            operations.record_playback,
+            PlaybackHistoryItem(
+                song_id=history_song.song_id,
+                name=history_song.name,
+                artists=history_song.artists,
+                platform=history_song.platform,
+                source=request.source,
+                result="started" if result.ok else "failed",
+                started_at=now,
+                ended_at="",
+                error_kind=error_kind,
+            ),
+        )
+    if stopped_item is not None and result.ok:
+        now = utc_now()
+        _record_diagnostic(
+            operations.record_playback,
+            PlaybackHistoryItem(
+                song_id=stopped_item.song.song_id,
+                name=stopped_item.song.name,
+                artists=stopped_item.song.artists,
+                platform=stopped_item.song.platform,
+                source=request.source,
+                result="stopped",
+                started_at="",
+                ended_at=now,
+            ),
+        )
+    return result
 
 
 def dispatch_oopz_music_command(
@@ -1370,7 +2003,10 @@ def dispatch_oopz_music_command(
     payload = command_result_to_legacy(result)
     _command_event(normalized, payload, "OOPZ")
 
-    if not _oopz_backend_notifies(normalized):
+    backend_notified = _oopz_backend_notifies(normalized)
+    if normalized.startswith("专辑点歌"):
+        backend_notified = bool(payload.get("backend_notified"))
+    if not backend_notified:
         music = _music_handler()
         _notify_music(
             music,
@@ -1390,6 +2026,8 @@ def _command_event(command: str, result: dict, source: str) -> None:
         "选歌",
         "榜单点歌",
         "榜单批量",
+        "专辑点歌",
+        "专辑加入",
         "删除",
         "移除",
         "暂停",
@@ -1484,19 +2122,73 @@ def _panel_snapshot() -> dict:
             channels = []
             channel_error = redact_secrets(str(exc), max_length=240)
     records = operations.snapshot()
+    live_metrics = metrics.summaries()
     runtime = getattr(music, "runtime", None)
+    platforms = getattr(music, "platforms", None)
+    qqmusic = platforms.get("qq") if hasattr(platforms, "get") else None
+    diagnostics = (
+        qqmusic.diagnostics()
+        if qqmusic is not None and callable(getattr(qqmusic, "diagnostics", None))
+        else {}
+    )
+    search_cache = getattr(music, "search_cache", None)
+    raw_credential = credential_status()
+    last_refresh = raw_credential.get("last_refresh") or {}
+    credential_state = (
+        "valid" if raw_credential.get("state") == "ok" else raw_credential.get("state", "missing")
+    )
+    if (
+        isinstance(last_refresh, dict)
+        and last_refresh
+        and not last_refresh.get("ok")
+        and credential_state not in {"missing", "expired"}
+    ):
+        credential_state = "refresh_failed"
+    credential = {
+        "state": credential_state,
+        "has_cookie": bool(raw_credential.get("has_cookie")),
+        "has_credential": bool(raw_credential.get("has_credential")),
+        "uin": raw_credential.get("uin", ""),
+        "saved_at": raw_credential.get("saved_at", 0),
+        "expires_at": raw_credential.get("expires_at", 0),
+        "cookie_updated_at": raw_credential.get("cookie_updated_at", 0),
+        "cookie_source": raw_credential.get("cookie_source", ""),
+        "auto_refresh_env": bool(raw_credential.get("auto_refresh_env")),
+        "last_refresh": {
+            "ok": bool(last_refresh.get("ok")),
+            "kind": last_refresh.get("kind", ""),
+            "message": redact_secrets(last_refresh.get("message", ""), max_length=240),
+            "checked_at": last_refresh.get("checked_at", 0),
+            "next_check_at": last_refresh.get("next_check_at", 0),
+        }
+        if isinstance(last_refresh, dict) and last_refresh
+        else {},
+    }
     return {
         "ok": True,
         "playback": playback,
         "queue": queue.get("queue_all", []),
         "queue_length": queue.get("queue_length", 0),
+        "queue_version": queue.get("queue_version", 0),
         "channels": channels,
         "channel_error": channel_error,
         "health": _service_health(music),
         "events": records.get("events", []),
         "jm_jobs": records.get("jm_jobs", []),
+        "playback_history": records.get("playback_history", []),
+        "command_history": records.get("command_history", []),
+        "failure_history": records.get("failure_history", []),
+        "external_metrics": {
+            **records.get("external_metrics", {}),
+            **live_metrics,
+        },
+        "qqmusic_diagnostics": diagnostics,
+        "qqmusic_credential": credential,
+        "search_cache": search_cache.snapshot() if search_cache is not None else {},
+        "schema_version": records.get("schema_version", 1),
         "jm_enabled": _env("QQBOT_JM_ENABLED").lower()
         in {"1", "true", "yes", "on"},
+        "album_request_enabled": _album_enabled(),
         "runtime_implementation": getattr(
             runtime,
             "implementation_name",
@@ -1520,6 +2212,7 @@ def _panel_snapshot() -> dict:
     router,
     qqbot_command,
     panel_snapshot,
+    panel_events,
     healthz,
     readyz,
 ) = create_bridge_router(
@@ -1529,4 +2222,5 @@ def _panel_snapshot() -> dict:
     readiness_snapshot=lambda: _readiness_snapshot(),
     music_ready=lambda: _music_dependency is not None,
     logger=logger,
+    state_publisher=state_publisher,
 )

@@ -225,3 +225,6 @@ cat <<EOF
 3. 查询频道：$venv_oopzbot discover
 4. 启动机器人：$venv_oopzbot start
 EOF
+if [ "$with_jm" -eq 1 ]; then
+  printf '%s\n' "5. 独立启动 JM worker：$project_dir/.venv/bin/oopzbot-jm-service（需要 Redis）"
+fi

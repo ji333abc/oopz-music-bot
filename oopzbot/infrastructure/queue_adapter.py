@@ -34,16 +34,35 @@ class LegacyQueueAdapter:
 
     def get_snapshot(self) -> QueueSnapshot:
         with self._lock:
-            get_current = getattr(self._queue, "get_current", None)
-            current = get_current() if callable(get_current) else None
-            pending = self._queue.get_queue()
-            get_play_state = getattr(self._queue, "get_play_state", None)
-            play_state = get_play_state() if callable(get_play_state) else None
+            get_atomic_snapshot = getattr(self._queue, "get_queue_snapshot", None)
+            if callable(get_atomic_snapshot):
+                raw = get_atomic_snapshot()
+                current = raw.get("current")
+                pending = raw.get("pending") or []
+                play_state = raw.get("play_state")
+                version = int(raw.get("version") or 0)
+                degraded = bool(raw.get("degraded"))
+            else:
+                # Compatibility-only fallback for third-party queue managers.
+                # Built-in implementations expose get_queue_snapshot so their
+                # optimistic version always describes the returned list.
+                get_current = getattr(self._queue, "get_current", None)
+                current = get_current() if callable(get_current) else None
+                pending = self._queue.get_queue()
+                get_play_state = getattr(self._queue, "get_play_state", None)
+                play_state = get_play_state() if callable(get_play_state) else None
+                version = (
+                    int(self._queue.get_version())
+                    if callable(getattr(self._queue, "get_version", None))
+                    else 0
+                )
+                degraded = self.degraded
             return queue_snapshot_from_legacy(
                 current,
                 pending,
                 play_state,
-                degraded=self.degraded,
+                degraded=degraded,
+                version=version,
             )
 
     def enqueue(self, item: QueueItem) -> int:
@@ -53,22 +72,55 @@ class LegacyQueueAdapter:
             # Reading length gives this port one stable one-based contract.
             return int(self._queue.get_queue_length())
 
+    def enqueue_many(
+        self,
+        items: Sequence[QueueItem],
+        expected_version: int | None = None,
+    ) -> int:
+        with self._lock:
+            encoded = [queue_item_to_legacy(item) for item in items]
+            if not encoded:
+                return int(self._queue.get_queue_length())
+            add_many = getattr(self._queue, "add_many_to_queue", None)
+            if callable(add_many):
+                return int(add_many(encoded, expected_version))
+
+            if expected_version is not None:
+                current = (
+                    int(self._queue.get_version())
+                    if callable(getattr(self._queue, "get_version", None))
+                    else 0
+                )
+                if current != expected_version:
+                    raise RuntimeError("queue version conflict")
+            for item in encoded:
+                self._queue.add_to_queue(item)
+            return int(self._queue.get_queue_length())
+
     def next_item(self) -> QueueItem | None:
         with self._lock:
             raw = self._queue.play_next()
             return queue_item_from_legacy(raw) if raw is not None else None
 
-    def clear(self) -> None:
+    def clear(self, expected_version: int | None = None) -> None:
         with self._lock:
             clear_queue = getattr(self._queue, "clear_queue", None)
             if callable(clear_queue):
-                clear_queue()
+                if expected_version is None:
+                    try:
+                        clear_queue(expected_version)
+                    except TypeError:
+                        clear_queue()
+                else:
+                    clear_queue(expected_version)
                 return
             pending = self._queue.get_queue()
             if pending:
-                self.remove_positions(range(1, len(pending) + 1))
+                self.remove_positions(range(1, len(pending) + 1), expected_version)
 
-    def remove_positions(self, positions: Sequence[int]) -> Sequence[QueueItem]:
+    def remove_positions(
+        self, positions: Sequence[int], expected_version: int | None = None
+    ) -> Sequence[QueueItem]:
         with self._lock:
             normalized = sorted(set(int(value) for value in positions))
             pending = self._queue.get_queue()
@@ -81,7 +133,13 @@ class LegacyQueueAdapter:
 
             remove_many = getattr(self._queue, "remove_positions", None)
             if callable(remove_many):
-                removed = remove_many(normalized)
+                if expected_version is None:
+                    try:
+                        removed = remove_many(normalized, expected_version)
+                    except TypeError:
+                        removed = remove_many(normalized)
+                else:
+                    removed = remove_many(normalized, expected_version)
             else:
                 removed = [pending[position - 1] for position in normalized]
                 remove_one = getattr(self._queue, "remove_from_queue", None)
@@ -91,6 +149,15 @@ class LegacyQueueAdapter:
                     if remove_one(position - 1) is False:
                         raise RuntimeError(f"failed to remove queue position {position}")
             return tuple(queue_item_from_legacy(item) for item in removed)
+
+    def move_position(
+        self, source: int, target: int, expected_version: int | None = None
+    ) -> None:
+        with self._lock:
+            move = getattr(self._queue, "move_position", None)
+            if not callable(move):
+                raise TypeError("queue does not support pending item reordering")
+            move(int(source), int(target), expected_version)
 
     def get_current(self) -> QueueItem | None:
         get_current = getattr(self._queue, "get_current", None)

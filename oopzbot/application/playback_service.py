@@ -91,9 +91,13 @@ class PlaybackService:
 
     def next(self, *, channel: str, area: str, requester_id: str) -> OperationResult:
         try:
-            self._backend.play_next(channel, area, requester_id)
+            raw = self._backend.play_next(channel, area, requester_id)
         except Exception as exc:
             return self._failure(str(exc) or "切歌失败", stage="switching")
+        if isinstance(raw, dict):
+            result = self._from_legacy(raw, "切歌失败")
+            if not result.ok or "已跳过" in result.message:
+                return result
         return OperationResult(ok=True, message="已执行切歌")
 
     def stop(self, *, channel: str, area: str) -> OperationResult:

@@ -7,18 +7,55 @@
 
 ### Added
 
+- 专辑点歌模式产品与技术规划书，以及可灰度启用的 QQ 群、OOPZ 文字频道和 Panel 操作闭环：支持专辑检索、曲目选择、整张/前 N 首/区间/离散编号原子入队，并在歌曲开播时解析最新地址、跳过失效曲目。
 - QQ 音乐扫码登录凭证存储、Cookie 状态文件、动态读取与后台自适应刷新。
 - `oopzbot qqmusic-login` 的登录、状态、刷新和 Cookie 查询命令。
 - QQ Music API 内部 Cookie 热更新端点，以及 Compose/本地托管的分发与重启兜底。
 - Panel 和健康快照中的 QQ 音乐凭证状态（不含任何密钥）。
+- Panel SSE 实时状态通道，包含 snapshot、state、reset 和 heartbeat 事件，并保留低频完整快照校准。
+- 搜歌结果 TTL/LRU 缓存、同请求合并、负缓存和可配置容量上限；播放 URL 与认证失败不会进入缓存。
+- QQMusic 外部请求的 last/p50/p95、成功率、错误分类、可播放率，以及命令、播放和失败历史诊断。
+- 待播队列的鼠标、触摸和键盘拖拽排序，以及基于 `queue_version` 的乐观并发控制。
+- 独立 `jm-worker` 镜像和 Compose `jm` Profile，通过 Redis 队列、租约续期和结果栅栏隔离长任务。
+- `oopzctl` 诊断、依赖清单、备份校验、安全升级、自动回滚和回滚点清理入口。
+
+### Changed
+
+- Panel 状态同步由高频完整轮询改为 SSE 语义通知加默认 60 秒校准，显著减少空闲快照请求。
+- Panel 状态文件升级到 schema 2；所有历史、指标和状态均有固定容量及 512 KiB 文件上限。
+- Bot 默认 `core` 镜像不再包含 JM Python/npm 依赖、Node 上传器或任务执行路径。
+- 旧 Web 播放器和管理后台的队列写入统一经过版本化 `QueueManager`。
 
 ### Fixed
 
 - QQ 音乐扫码登录、状态校验和自动续期现在复用持久化的虚拟设备身份，并跨进程串行访问设备文件，避免并发命令或每次刷新凭证被登记成新的设备。
+- 专辑搜索现在兼容固定 QQ 音乐 API 2.4.0 的 `response.data` Smartbox 响应封装，不再把有效专辑结果误报为“未找到”。
+- QQ 音乐连续解析失败时最多跳过 3 首并保留其余队列，批量专辑请求会明确报告未能开播；专辑会话现在会主动清理过期项并限制容量。
+- QQ 专辑曲目键盘现在保持在平台行数限制内，默认关闭专辑模式时 Panel 不再显示不可用入口。
+- 安全升级和自动回滚现在会等待 Bot 与 Panel 完成启动并重试健康检查，不再因容器启动瞬间的连接拒绝误判失败。
+- 直接运行仓库的 `./oopzctl` 时会自动加载项目包，不再要求运维人员手动设置 `PYTHONPATH`。
+- 队列内容与 `queue_version` 现在通过共享锁或 Redis Lua 原子读取，避免并发自动切歌时删除或移动错误歌曲。
+- 拖拽排序请求发生网络或响应解析错误时会撤销乐观顺序并重新同步服务端状态。
+- SSE 在线时仍执行低频校准，自然切歌、旧 Web 写入和 worker 心跳变化不会使面板长期停留在旧状态。
+- SSE 等待改为异步通知，不再由每个连接长期占用命令和就绪探测共享的默认线程池。
+- Linux 仓库入口 `oopzctl` 现在带可执行权限，可直接按部署文档使用 `./oopzctl`。
+- JM worker 的 Redis 读取超时现在长于阻塞取任务周期，空队列时不会因超时竞争反复退出重启。
+
+### Security
+
+- 新增的状态、诊断和历史数据在写盘及导出前统一限制容量并脱敏 URL、Cookie、Token 和用户标识。
+- JM worker 只接收 QQ App、Redis 和任务限制配置，不接收 OOPZ、QQMusic Cookie 或 Panel 密钥。
 
 ### Upgrade notes
 
 - 升级后的首次 QQ 音乐请求会在凭证目录创建 `qqmusic-device.json`；请像凭证文件一样持久化该文件且不要跨账号共用。首次建立固定设备身份时仍可能新增最后一条设备记录，历史重复设备需在 QQ 音乐设备管理中手动清理。
+- 专辑点歌默认关闭；灰度启用时设置 `OOPZ_ALBUM_REQUEST_ENABLED=true`。可用 `OOPZ_ALBUM_REQUEST_MAX_TRACKS` 和 `OOPZ_ALBUM_REQUEST_SESSION_TTL_SECONDS` 调整单次入队上限与会话有效期；回滚只需将开关改回 `false` 并重启服务，不需要数据迁移。
+- 当前候选分支：`codex/album-request-mode`；部署时以远程分支最新提交为准。
+- 升级前确保服务器工作树干净、`.env` 已配置 `QQBOT_BRIDGE_TOKEN` 和 `OOPZ_PANEL_PASSWORD`，并至少保留 1 GiB 可用磁盘。
+- 默认部署先执行 `./oopzctl upgrade --ref codex/album-request-mode --dry-run`，确认后执行同一命令并移除 `--dry-run`。
+- 启用 JM 时必须设置 `QQBOT_JM_ENABLED=true`，并在两条升级命令中同时添加 `--profile jm`。
+- 升级工具会在切换前创建并校验 data/Redis 备份；健康检查失败时恢复旧提交和旧镜像，不自动覆盖数据。
+- 回滚使用 `./oopzctl rollback --release <RELEASE_ID>`；只有明确需要恢复数据时才运行带 `--confirm` 的 restore。
 
 ## [0.1.1] - 2026-08-28
 

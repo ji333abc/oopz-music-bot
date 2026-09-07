@@ -58,6 +58,8 @@ docker compose up -d --build
 docker compose logs -f bot
 ```
 
+默认镜像不含 JM 依赖。需要 JM 文件任务时设置 `.env` 中的开关和白名单，再运行 `docker compose --profile jm up -d --build`。面板使用 SSE 实时更新，并支持待播队列鼠标、触摸和键盘拖拽排序。
+
 Compose 会启动 `bot`、`redis`、固定版本的 `qqmusic` 和 `panel`。音乐接口和机器人桥接只在容器内部网络开放；新面板默认监听宿主机 `127.0.0.1:3000`，旧版 OOPZ Web 播放页默认监听 `127.0.0.1:18081`。新面板自带 HTTP Basic Auth（启动前必须设置 `OOPZ_PANEL_PASSWORD`），适合由 Nginx/Caddy 加 HTTPS 后对外提供。
 
 Bot 容器的入口会在首次启动时修正 `./data` 挂载目录的所有权，然后立即降权为
@@ -97,7 +99,7 @@ sh install.sh --with-jm
 
 | Linux / macOS | Windows PowerShell | 作用 |
 | --- | --- | --- |
-| `--with-jm` | `-WithJm` | 安装 JM 文件任务和 Node.js 上传器 |
+| `--with-jm` | `-WithJm` | 安装独立 JM worker 和 Node.js 上传器依赖 |
 | `--skip-browser` | `-SkipBrowser` | 跳过 Chromium 下载 |
 | `--external-music-api` | `-ExternalMusicApi` | 不安装默认 API，改用已有兼容服务 |
 | `--non-interactive` | `-NonInteractive` | 使用默认选项，适合自动化部署 |
@@ -110,6 +112,8 @@ sh install.sh --with-jm
 .venv/bin/oopzbot check      # 离线检查配置
 .venv/bin/oopzbot start      # 启动
 ```
+
+非 Compose 环境启用 JM 时，还需连接 Redis，并把 `.venv/bin/oopzbot-jm-service` 作为独立服务启动；下载、压缩和上传不会在 Bot 进程内执行。
 
 Windows PowerShell 执行：
 
@@ -151,10 +155,15 @@ QQ_MUSIC_BASE_URL=http://127.0.0.1:3200
 
 完整说明见 [docs/CONFIGURATION.md](docs/CONFIGURATION.md)。Git 忽略规则覆盖 `.env`、Cookie、Token、日志和运行数据。
 
-## 群命令
+## QQ 群与 OOPZ 文字频道命令
 
 ```text
 点歌 <歌名>        搜索并播放或加入队列
+专辑 <专辑名>      搜索专辑（需启用 OOPZ_ALBUM_REQUEST_ENABLED）
+专辑选择 <编号>    查看候选专辑曲目
+专辑点歌 <编号>    播放选中专辑的一首歌曲
+专辑加入 全部      原子批量加入（也支持 前N首、N-M、1 3 5 跳选）
+取消专辑           清除当前用户的专辑选择会话
 搜歌 <关键词>      返回前 10 首候选歌曲
 选歌 <编号>        选择最近一次搜索结果
 面板 / 队列        显示当前播放、待播队列和删除按钮
@@ -171,7 +180,7 @@ QQ_MUSIC_BASE_URL=http://127.0.0.1:3200
 帮助
 ```
 
-所有 QQ 群命令都需要先 `@机器人`。
+QQ 群和 OOPZ 文字频道均支持上述专辑命令；在需要提及机器人的频道中先 `@机器人`。
 
 ## 开发
 

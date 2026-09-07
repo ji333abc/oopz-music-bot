@@ -109,6 +109,25 @@ class OopzMessageCallbackTests(unittest.TestCase):
         )
         self.assertEqual(bridge._modern_oopz_music_command("播放"), "播放")
 
+    def test_oopz_album_commands_normalize_into_shared_parser(self) -> None:
+        from oopzbot import bridge
+
+        commands = (
+            "专辑 叶惠美",
+            "专辑选择 1",
+            "选专辑 1",
+            "专辑曲目 2",
+            "专辑点歌 3",
+            "专辑加入 全部",
+            "专辑加入 前5首",
+            "专辑加入 3-8",
+            "专辑加入 1 3 5 7 9",
+            "取消专辑",
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(bridge._modern_oopz_music_command(command), command)
+
     def test_oopz_dispatch_uses_transport_target_and_avoids_duplicate_play_reply(self) -> None:
         from oopzbot import bridge
         from oopzbot.domain.contracts import CommandResult
@@ -135,6 +154,88 @@ class OopzMessageCallbackTests(unittest.TestCase):
         self.assertEqual(request.text_channel_id, "text-1")
         self.assertEqual(request.bot_user_id, "")
         notify.assert_not_called()
+
+    def test_oopz_album_search_sends_result_through_text_channel(self) -> None:
+        from oopzbot import bridge
+        from oopzbot.domain.contracts import CommandResult
+
+        with (
+            patch.object(
+                bridge,
+                "_execute_request",
+                return_value=CommandResult(ok=True, message="找到专辑：叶惠美"),
+            ),
+            patch.object(bridge, "_music_handler", return_value=object()),
+            patch.object(bridge, "_notify_music") as notify,
+        ):
+            handled = bridge.dispatch_oopz_music_command(
+                "专辑 叶惠美",
+                "text-1",
+                "area-1",
+                "user-1",
+            )
+
+        self.assertTrue(handled)
+        notify.assert_called_once_with(
+            unittest.mock.ANY,
+            text="找到专辑：叶惠美",
+            channel="text-1",
+            area="area-1",
+        )
+
+    def test_oopz_album_song_avoids_duplicate_backend_reply(self) -> None:
+        from oopzbot import bridge
+        from oopzbot.domain.contracts import CommandResult
+
+        with (
+            patch.object(
+                bridge,
+                "_execute_request",
+                return_value=CommandResult(
+                    ok=True,
+                    message="已选择歌曲",
+                    extras={"backend_notified": True},
+                ),
+            ),
+            patch.object(bridge, "_notify_music") as notify,
+        ):
+            handled = bridge.dispatch_oopz_music_command(
+                "专辑点歌 3",
+                "text-1",
+                "area-1",
+                "user-1",
+            )
+
+        self.assertTrue(handled)
+        notify.assert_not_called()
+
+    def test_oopz_album_song_validation_error_is_sent_to_text_channel(self) -> None:
+        from oopzbot import bridge
+        from oopzbot.domain.contracts import CommandResult
+
+        with (
+            patch.object(
+                bridge,
+                "_execute_request",
+                return_value=CommandResult(ok=False, message="专辑搜索结果已失效"),
+            ),
+            patch.object(bridge, "_music_handler", return_value=object()),
+            patch.object(bridge, "_notify_music") as notify,
+        ):
+            handled = bridge.dispatch_oopz_music_command(
+                "专辑点歌 3",
+                "text-1",
+                "area-1",
+                "user-1",
+            )
+
+        self.assertTrue(handled)
+        notify.assert_called_once_with(
+            unittest.mock.ANY,
+            text="专辑搜索结果已失效",
+            channel="text-1",
+            area="area-1",
+        )
 
     def test_oopz_dispatch_reports_modern_failure_without_legacy_fallback(self) -> None:
         from oopzbot import bridge
@@ -224,6 +325,51 @@ class QQCommandResultTransportTests(unittest.IsolatedAsyncioTestCase):
         renderer.assert_awaited_once()
         self.assertIs(renderer.await_args.args[1], result)
 
+    async def test_album_detail_reaches_album_renderer_unchanged(self) -> None:
+        import importlib
+
+        service = importlib.import_module("oopzbot.qqbot")
+        client = object.__new__(service.OopzQQClient)
+        renderer = AsyncMock()
+        result = {
+            "ok": True,
+            "reply_type": "album_detail",
+            "album": {"id": "album-1", "name": "专辑"},
+            "tracks": [{"id": "track-1", "name": "歌曲", "index": 1}],
+        }
+
+        with patch.object(client, "_reply_album_detail", new=renderer):
+            await client._reply_result(types.SimpleNamespace(), result, "user-1")
+
+        renderer.assert_awaited_once()
+        self.assertIs(renderer.await_args.args[1], result)
+
+    async def test_album_detail_keyboard_stays_within_five_rows(self) -> None:
+        import importlib
+
+        service = importlib.import_module("oopzbot.qqbot")
+        client = object.__new__(service.OopzQQClient)
+        client._post_group_message = AsyncMock()
+        client._reply_identity = Mock(return_value={})
+        result = {
+            "ok": True,
+            "reply_type": "album_detail",
+            "album": {"id": "album-1", "name": "专辑", "track_count": 30},
+            "tracks": [
+                {"id": f"track-{index}", "name": f"歌曲 {index}", "index": index}
+                for index in range(11, 21)
+            ],
+            "page": 2,
+            "total_pages": 3,
+        }
+
+        await client._reply_album_detail(
+            types.SimpleNamespace(), result, "user-1"
+        )
+
+        payload = client._post_group_message.await_args.args[1]
+        self.assertLessEqual(len(payload["keyboard"]["content"]["rows"]), 5)
+
 
 class JMEntryContractTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
@@ -307,6 +453,10 @@ class JMEntryContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_single_jm_entry_creates_job_and_schedules_background_run(self) -> None:
         message = self._message("JM 123")
         scheduled: list[_ScheduledTask] = []
+        queue = types.SimpleNamespace(
+            available=Mock(return_value=True),
+            submit_many=Mock(),
+        )
 
         def schedule(coroutine):
             coroutine.close()
@@ -317,11 +467,11 @@ class JMEntryContractTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(self.service, "JM_ENABLED", True),
             patch.object(self.service, "JM_ALLOWED_USERS", set()),
-            patch.object(self.service, "_inspect_jm_album", return_value=12),
+            patch.object(self.service, "RedisJMQueue", return_value=queue),
             patch.object(
                 self.service.operations,
                 "begin_jm_job",
-                return_value="job-1",
+                return_value="a" * 32,
             ) as begin,
             patch.object(self.service.operations, "update_jm_job"),
             patch.object(self.client, "_reply", new=AsyncMock()) as reply,
@@ -333,12 +483,21 @@ class JMEntryContractTests(unittest.IsolatedAsyncioTestCase):
         begin.assert_called_once_with(
             "123",
             requester="QQ 群用户",
+            batch_index=1,
+            batch_total=1,
         )
-        self.assertIn("已开始下载 JM123", reply.await_args.args[1])
+        queue.submit_many.assert_called_once()
+        submitted = queue.submit_many.call_args.args[0]
+        self.assertEqual([job.album_id for job in submitted], ["123"])
+        self.assertIn("由独立 worker 顺序处理", reply.await_args.args[1])
 
     async def test_batch_jm_entry_creates_ordered_jobs_and_one_background_run(self) -> None:
         message = self._message("JM 123 456")
         scheduled: list[_ScheduledTask] = []
+        queue = types.SimpleNamespace(
+            available=Mock(return_value=True),
+            submit_many=Mock(),
+        )
 
         def schedule(coroutine):
             coroutine.close()
@@ -349,11 +508,11 @@ class JMEntryContractTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(self.service, "JM_ENABLED", True),
             patch.object(self.service, "JM_ALLOWED_USERS", set()),
-            patch.object(self.service, "_inspect_jm_album", side_effect=[12, 24]),
+            patch.object(self.service, "RedisJMQueue", return_value=queue),
             patch.object(
                 self.service.operations,
                 "begin_jm_job",
-                side_effect=["job-1", "job-2"],
+                side_effect=["a" * 32, "b" * 32],
             ) as begin,
             patch.object(self.service.operations, "update_jm_job"),
             patch.object(self.client, "_reply", new=AsyncMock()) as reply,
@@ -363,7 +522,26 @@ class JMEntryContractTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(scheduled), 1)
         self.assertEqual(begin.call_count, 2)
-        self.assertIn("已开始 JM 批量任务，共 2 个", reply.await_args.args[1])
+        queue.submit_many.assert_called_once()
+        submitted = queue.submit_many.call_args.args[0]
+        self.assertEqual([job.album_id for job in submitted], ["123", "456"])
+        self.assertIn("已提交 JM 任务，共 2 个", reply.await_args.args[1])
+
+    async def test_enabled_jm_without_worker_stays_available_for_music(self) -> None:
+        message = self._message("JM 123")
+        queue = types.SimpleNamespace(available=Mock(return_value=False))
+
+        with (
+            patch.object(self.service, "JM_ENABLED", True),
+            patch.object(self.service, "JM_ALLOWED_USERS", set()),
+            patch.object(self.service, "RedisJMQueue", return_value=queue),
+            patch.object(self.client, "_reply", new=AsyncMock()) as reply,
+        ):
+            await self.client._start_jm_job(message, "123", "user-1")
+
+        self.assertIn("JM 服务未启用或当前不可用", reply.await_args.args[1])
+        self.assertTrue(self.service._jm_job_lock.acquire(blocking=False))
+        self.service._jm_job_lock.release()
 
 
 if __name__ == "__main__":

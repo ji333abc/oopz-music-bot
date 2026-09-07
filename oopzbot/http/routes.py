@@ -14,6 +14,8 @@ from oopzbot.config import get_settings
 from oopzbot.domain.compat import command_result_to_legacy
 from oopzbot.domain.contracts import CommandRequest
 from oopzbot.observability import command_context, ensure_command_id
+from oopzbot.sse import panel_event_stream
+from oopzbot.state_publisher import StatePublisher
 
 from .security import authorize_bridge_request
 from .validation import CommandInputError, command_request_from_http
@@ -27,6 +29,7 @@ def create_bridge_router(
     readiness_snapshot: Callable[[], dict],
     music_ready: Callable[[], bool],
     logger: logging.Logger,
+    state_publisher: StatePublisher | None = None,
 ):
     """Build routes around injected application and status boundaries."""
 
@@ -63,7 +66,12 @@ def create_bridge_router(
                     result,
                     command_request.requester_name,
                 )
-            return JSONResponse({**result, "command_id": command_id})
+                if state_publisher is not None:
+                    state_publisher.publish()
+            status_code = 409 if result.get("code") == "queue_conflict" else 200
+            return JSONResponse(
+                {**result, "command_id": command_id}, status_code=status_code
+            )
         except Exception as exc:
             with command_context(command_id):
                 logger.exception("执行 QQBot 桥接命令失败")
@@ -89,6 +97,40 @@ def create_bridge_router(
                 status_code=503,
             )
 
+    @router.get("/internal/panel/events")
+    async def panel_events_route(request: Request):
+        from fastapi.responses import StreamingResponse
+
+        if rejection := authorize_bridge_request(request, get_settings()):
+            return rejection
+        settings = get_settings()
+        if not settings.panel_sse_enabled:
+            return JSONResponse(
+                {"ok": False, "message": "Panel SSE 已禁用"}, status_code=404
+            )
+
+        publisher = state_publisher or StatePublisher()
+        try:
+            after = max(0, int(request.headers.get("last-event-id") or 0))
+        except ValueError:
+            after = 0
+
+        return StreamingResponse(
+            panel_event_stream(
+                request=request,
+                publisher=publisher,
+                panel_snapshot=panel_snapshot,
+                after_revision=after,
+                heartbeat_seconds=float(settings.panel_sse_heartbeat_seconds),
+            ),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-store, no-transform",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
+
     @router.get("/healthz")
     async def healthz():
         # Liveness must never call QQ, OOPZ, Redis, or another external service.
@@ -101,4 +143,11 @@ def create_bridge_router(
         result = await asyncio.to_thread(readiness_snapshot)
         return JSONResponse(result, status_code=200 if result["ok"] else 503)
 
-    return router, qqbot_command, panel_snapshot_route, healthz, readyz
+    return (
+        router,
+        qqbot_command,
+        panel_snapshot_route,
+        panel_events_route,
+        healthz,
+        readyz,
+    )

@@ -56,6 +56,7 @@ class CommandRequest:
     text_channel_id: str = ""
     voice_channel_id: str = ""
     bot_user_id: str = ""
+    expected_version: int | None = None
 
     @property
     def requester_key(self) -> str:
@@ -119,6 +120,7 @@ class QueueSnapshot:
     pending: tuple[QueueItem, ...] = ()
     playback: PlaybackState | None = None
     degraded: bool = False
+    version: int = 0
 
     @property
     def queue_length(self) -> int:
@@ -194,14 +196,30 @@ class QueuePort(Protocol):
         """Append and return the one-based pending position."""
         ...
 
+    def enqueue_many(
+        self,
+        items: Sequence[QueueItem],
+        expected_version: int | None = None,
+    ) -> int:
+        """Atomically append a batch and return the final pending length."""
+        ...
+
     def next_item(self) -> QueueItem | None: ...
 
-    def clear(self) -> None:
+    def clear(self, expected_version: int | None = None) -> None:
         """Clear pending items only; current/playback have explicit methods."""
         ...
 
-    def remove_positions(self, positions: Sequence[int]) -> Sequence[QueueItem]:
+    def remove_positions(
+        self, positions: Sequence[int], expected_version: int | None = None
+    ) -> Sequence[QueueItem]:
         """Atomically remove unique one-based pending positions."""
+        ...
+
+    def move_position(
+        self, source: int, target: int, expected_version: int | None = None
+    ) -> None:
+        """Atomically move one pending item to its final one-based position."""
         ...
 
     def get_current(self) -> QueueItem | None: ...

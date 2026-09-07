@@ -4,10 +4,15 @@ import { callSnapshot } from "../../../lib/bridge";
 export async function GET() {
   try {
     const { response, result } = await callSnapshot();
+    const configuredPoll = Number(process.env.OOPZ_PANEL_SSE_FALLBACK_POLL_SECONDS || 60);
+    const fallbackPollSeconds = Number.isFinite(configuredPoll)
+      ? Math.min(300, Math.max(10, configuredPoll))
+      : 60;
     return NextResponse.json(
       {
         ...result,
         operator: process.env.OOPZ_PANEL_USERNAME?.trim() || "admin",
+        sse_fallback_poll_seconds: fallbackPollSeconds,
       },
       {
         status: response.status,
