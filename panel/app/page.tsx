@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import QueueSortableList, { type QueueSong } from "../components/QueueSortableList";
+import { healthSnapshot, metricSnapshot, cacheSnapshot, snapshotTime, type ComponentHealth, type LatencyMetric } from "../lib/snapshot";
 
 type PanelSection = "overview" | "music" | "queue" | "members" | "jm";
 type Song = QueueSong;
@@ -28,12 +29,6 @@ type VoiceChannel = {
   configured: boolean;
   member_count: number;
   members: Member[];
-};
-type ComponentHealth = {
-  status: "starting" | "ok" | "degraded" | "error" | "offline" | "unknown";
-  message: string;
-  reason?: string;
-  updated_at?: string;
 };
 type PanelEvent = {
   id: string;
@@ -79,7 +74,6 @@ type Infrastructure = {
   disk?: ResourceMetric | null;
   memory?: ResourceMetric | null;
 };
-type LatencyMetric = { count?: number; success?: number; failure?: number; last_ms?: number | null; p50_ms?: number | null; p95_ms?: number | null; success_rate?: number | null; result_counts?: Record<string, number> };
 type CommandTiming = { command_id?: string; source?: string; kind?: string; ok?: boolean; error_kind?: string; duration_ms?: number; created_at?: string };
 type FailureItem = { component?: string; error_kind?: string; message?: string; command_id?: string; created_at?: string };
 type PlaybackHistoryItem = { song_id?: string; name?: string; artists?: string; platform?: string; source?: string; result?: string; error_kind?: string; started_at?: string; ended_at?: string };
@@ -267,13 +261,13 @@ export default function Home() {
       }
       setChannels(Array.isArray(data.channels) ? data.channels as VoiceChannel[] : []);
       setChannelError(String(data.channel_error || ""));
-      setHealth(data.health && typeof data.health === "object" ? data.health : {});
+      setHealth(healthSnapshot(data.health));
       setEvents(Array.isArray(data.events) ? data.events as PanelEvent[] : []);
       setJmJobs(Array.isArray(data.jm_jobs) ? data.jm_jobs as JmJob[] : []);
       setJmEnabled(Boolean(data.jm_enabled));
       setAlbumEnabled(Boolean(data.album_request_enabled));
-      setExternalMetrics(data.external_metrics && typeof data.external_metrics === "object" ? data.external_metrics : {});
-      setSearchCache(data.search_cache && typeof data.search_cache === "object" ? data.search_cache : {});
+      setExternalMetrics(metricSnapshot(data.external_metrics));
+      setSearchCache(cacheSnapshot(data.search_cache));
       setCommandHistory(Array.isArray(data.command_history) ? data.command_history as CommandTiming[] : []);
       setPlaybackHistory(Array.isArray(data.playback_history) ? data.playback_history as PlaybackHistoryItem[] : []);
       setFailureHistory(Array.isArray(data.failure_history) ? data.failure_history as FailureItem[] : []);
@@ -282,7 +276,7 @@ export default function Home() {
       setFallbackPollMs(Math.min(300, Math.max(10, Number(data.sse_fallback_poll_seconds) || 60)) * 1000);
       setConnected(true);
       setStatusMessage(sseConnected ? "实时事件流已连接" : "状态已同步，使用回退轮询");
-      setLastUpdated(new Date(data.updated_at || Date.now()).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+      setLastUpdated(snapshotTime(data.updated_at));
   }, [dragState, queueBusy, sseConnected]);
 
   const refresh = useCallback(async () => {
@@ -432,7 +426,7 @@ export default function Home() {
     setQueueBusy(true);
     const result = await sendCommand("清空队列", queueVersion);
     if (Array.isArray(result?.queue_all)) {
-      setQueue(result.queue_all.map(normalizeSong));
+      setQueue(result.queue_all.map((song) => normalizeSong(song)));
       setQueueVersion(Number(result.queue_version) || queueVersion);
     }
     setQueueBusy(false);

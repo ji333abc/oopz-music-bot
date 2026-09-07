@@ -49,7 +49,8 @@ test("protects and renders the real-data control panel shell", async () => {
   assert.doesNotMatch(html, /Administrator/);
   assert.doesNotMatch(html, /演示模式/);
   assert.doesNotMatch(html, /上一首/);
-  assert.doesNotMatch(html, /音量/);
+  assert.match(html, /id="playback-volume"[^>]*type="range"/);
+  assert.match(html, /aria-valuetext="30%"/);
   assert.doesNotMatch(html, /QQBOT_BRIDGE_TOKEN/);
   const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(source, /60 \* 60 \* 1000/);

@@ -21,7 +21,7 @@ function bridgeToken(): string {
 export async function callBridge(
   command: string,
   requesterId: string,
-  commandId = randomUUID(),
+  commandId: string = randomUUID(),
   expectedVersion?: number,
 ): Promise<{
   response: Response;
