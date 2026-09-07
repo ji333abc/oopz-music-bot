@@ -35,3 +35,8 @@ nav{display:flex;flex-direction:column;gap:4px}.nav-item{appearance:none;border:
 @media(max-width:1200px){.health-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:760px){.health-grid{grid-template-columns:1fr 1fr}}
 @media(max-width:480px){.health-grid{grid-template-columns:1fr}}
+.volume-control { display: flex; align-items: center; gap: 12px; margin-top: 18px; font-size: 14px; }
+.volume-control input { flex: 1; min-width: 0; max-width: 260px; accent-color: var(--green); cursor: pointer; }
+.volume-control input:disabled { cursor: not-allowed; opacity: .5; }
+.volume-control output { min-width: 4ch; font-variant-numeric: tabular-nums; }
+#volume-hint { display: block; margin-top: 6px; font-size: 12px; opacity: .7; }

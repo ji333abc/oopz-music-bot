@@ -228,7 +228,7 @@ REMINDER_CONFIG = {
     "check_interval_seconds": 15,
 }
 MESSAGE_STATS_CONFIG = {"enabled": _bool("OOPZ_MESSAGE_STATS_ENABLED", True)}
-MUSIC_CONFIG = {"auto_play_enabled": True, "default_volume": _int("OOPZ_DEFAULT_VOLUME", 50)}
+MUSIC_CONFIG = {"auto_play_enabled": True, "default_volume": _int("OOPZ_DEFAULT_VOLUME", 30)}
 COMMAND_COOLDOWN_CONFIG = {
     "enabled": _bool("OOPZ_COMMAND_COOLDOWN_ENABLED", False),
     "default_seconds": _int("OOPZ_COMMAND_COOLDOWN_SECONDS", 3),

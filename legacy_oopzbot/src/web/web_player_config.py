@@ -160,7 +160,7 @@ CONFIG_FIELD_SCHEMA: dict[str, dict[str, dict]] = {
     },
     "music": {
         "auto_play_enabled": {"type": "bool", "default": True},
-        "default_volume": {"type": "int", "min": 0, "max": 100, "default": 50},
+        "default_volume": {"type": "int", "min": 0, "max": 100, "default": 30},
     },
     "command_cooldown": {
         "enabled": {"type": "bool", "default": False},

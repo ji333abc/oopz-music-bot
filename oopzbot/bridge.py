@@ -870,6 +870,8 @@ def _music_channel_member_count(music, area: str, voice_channel: str, bot_user: 
 
 
 def _playback_payload(music, area: str, voice_channel: str, bot_user: str) -> dict:
+    from .volume import saved_volume
+
     snapshot = _queue_service(music, area).snapshot()
     current = queue_item_to_legacy(snapshot.current) if snapshot.current else None
     play_state = snapshot.playback or PlaybackState()
@@ -889,6 +891,8 @@ def _playback_payload(music, area: str, voice_channel: str, bot_user: str) -> di
 
     return {
         "current": _qq_song_payload(current) if current else None,
+        "volume": saved_volume(getattr(music.queue, "redis", None)),
+        "volume_supported": callable(getattr(getattr(music, "voice", None), "set_volume", None)),
         "playing": bool(current),
         "paused": play_state.paused,
         "loading": play_state.loading,
@@ -1474,6 +1478,14 @@ def _execute_command_impl(request: CommandRequest) -> dict:
         music_requester = request.requester_id if request.source == "oopz" else bot_user
 
         command_kind = exact_command_kind(command)
+
+        if command.startswith("音量"):
+            from .volume import set_music_volume
+
+            match = re.fullmatch(r"音量\s+(\d{1,3})%?", command)
+            if not match:
+                return {"ok": False, "message": "用法：音量 30（范围 0～100）"}
+            return set_music_volume(music, int(match.group(1)))
 
         if command_kind is CommandKind.STATUS:
             playback = _playback_payload(

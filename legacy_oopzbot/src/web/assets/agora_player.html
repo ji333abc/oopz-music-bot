@@ -29,7 +29,7 @@ let currentMicMuted = false;
 let currentSpeakerMuted = false;
 // 跨 audioTrack 持久化的音量（0-100）。每次创建新 track 后会自动应用，
 // 避免每首歌切换后用户都得重新拖一次音量条。
-let _currentVolume = 100;
+let _currentVolume = 30;
 
 window.agoraReady = () => typeof AgoraRTC !== "undefined";
 

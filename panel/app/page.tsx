@@ -57,6 +57,7 @@ type JmJob = {
   updated_at: string;
 };
 type CommandResult = {
+  volume?: number;
   ok?: boolean;
   message?: string;
   songs?: Song[];
@@ -179,6 +180,12 @@ export default function Home() {
   const [refreshing, setRefreshing] = useState(false);
   const [playback, setPlayback] = useState<Playback>(emptyPlayback);
   const [elapsed, setElapsed] = useState(0);
+  const [volume, setVolume] = useState(30);
+  const [volumeSupported, setVolumeSupported] = useState(false);
+  const [volumeBusy, setVolumeBusy] = useState(false);
+  const volumeEditing = useRef(false);
+  const volumeSaved = useRef(30);
+  const volumeSaving = useRef(false);
   const [queue, setQueue] = useState<Song[]>([]);
   const [queueVersion, setQueueVersion] = useState(0);
   const [queueBusy, setQueueBusy] = useState(false);
@@ -236,6 +243,11 @@ export default function Home() {
 
   const applySnapshot = useCallback((data: Record<string, unknown>) => {
       const rawPlayback = (data.playback || {}) as Record<string, unknown>;
+      setVolumeSupported(Boolean(rawPlayback.volume_supported));
+      if (!volumeEditing.current && typeof rawPlayback.volume === "number") {
+        volumeSaved.current = Math.max(0, Math.min(100, rawPlayback.volume));
+        setVolume(volumeSaved.current);
+      }
       const current = rawPlayback.current ? normalizeSong(rawPlayback.current as Song) : {};
       const nextPlayback: Playback = {
         ...emptyPlayback,
@@ -384,6 +396,24 @@ export default function Home() {
       setToast(error instanceof Error ? error.message : "命令执行失败");
       return null;
     }
+  };
+
+  const commitVolume = async (value: number) => {
+    if (volumeSaving.current) return;
+    if (value === volumeSaved.current) {
+      volumeEditing.current = false;
+      return;
+    }
+    volumeEditing.current = true;
+    volumeSaving.current = true;
+    setVolumeBusy(true);
+    const result = await sendCommand(`音量 ${value}`);
+    if (result?.ok) volumeSaved.current = value;
+    setVolume(volumeSaved.current);
+    volumeEditing.current = false;
+    volumeSaving.current = false;
+    setVolumeBusy(false);
+    refresh();
   };
 
   const removeQueueItem = async (index: number) => {
@@ -601,6 +631,18 @@ export default function Home() {
                   <div className="progress-track"><div style={{ width: `${progress}%` }} /><i style={{ left: `${progress}%` }} /></div>
                   <div className="time-row"><span>{formatTime(elapsed)}</span><span>{formatTime(playback.duration)}</span></div>
                   <div className="player-controls"><button className="play-button" disabled={!playback.playing} aria-label={playback.paused ? "继续" : "暂停"} onClick={() => sendCommand(playback.paused ? "继续" : "暂停")}>{playback.paused ? "▶" : "Ⅱ"}</button><button aria-label="下一首" disabled={!playback.playing && queue.length === 0} onClick={() => sendCommand("切歌")}>›</button><button className="stop-button" aria-label="停止" disabled={!playback.playing} onClick={() => sendCommand("停止")}>■</button></div>
+                  <div className="volume-control">
+                    <label htmlFor="playback-volume">音量</label>
+                    <input id="playback-volume" type="range" min="0" max="100" step="1" value={volume}
+                      disabled={!connected || !volumeSupported || volumeBusy}
+                      aria-valuetext={`${volume}%`} aria-describedby="volume-hint"
+                      onChange={(event) => { volumeEditing.current = true; setVolume(Number(event.target.value)); }}
+                      onPointerUp={(event) => void commitVolume(Number(event.currentTarget.value))}
+                      onKeyUp={(event) => void commitVolume(Number(event.currentTarget.value))}
+                      onBlur={(event) => { if (!volumeBusy) void commitVolume(Number(event.currentTarget.value)); }} />
+                    <output htmlFor="playback-volume">{volume}%</output>
+                  </div>
+                  <small id="volume-hint">{volumeBusy ? "正在保存…" : "调整后自动保存，重启后保留"}</small>
                 </div>
               </div>
             </article>

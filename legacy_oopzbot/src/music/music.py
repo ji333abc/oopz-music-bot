@@ -413,7 +413,9 @@ class MusicHandler(PlaybackMixin):
             logger.debug(f"读取 {KEY_VOLUME} 失败，跳过音量恢复: {e}")
             return
         if raw is None:
-            return
+            from oopzbot.volume import default_volume
+
+            raw = default_volume()
         try:
             vol = int(raw)
         except (TypeError, ValueError):
