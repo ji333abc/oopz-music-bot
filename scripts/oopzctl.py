@@ -407,12 +407,36 @@ def _verify_services(
         _wait_for_url(health_url, label="公网 Panel health")
 
 
+def _check_upgrade_space(*, backup_pending: bool = True) -> dict[str, int]:
+    """Estimate staging plus a poorly compressible archive, with build headroom."""
+    data_bytes = 0
+    if backup_pending:
+        for path in (ROOT / "data").rglob("*"):
+            relative = path.relative_to(ROOT / "data")
+            if path.is_symlink() or not path.is_file():
+                continue
+            if any(part == ".env" or part.startswith(".env.") for part in relative.parts):
+                continue
+            data_bytes += path.stat().st_size
+    free_bytes = shutil.disk_usage(ROOT).free
+    reserve_bytes = 1024 * 1024 * 1024
+    required_bytes = data_bytes * 2 + reserve_bytes
+    if free_bytes < required_bytes:
+        gib = 1024 ** 3
+        raise RuntimeError(
+            f"可用磁盘不足：剩余 {free_bytes / gib:.2f} GiB，"
+            f"本次至少预留 {required_bytes / gib:.2f} GiB"
+            f"（data {data_bytes / gib:.2f} GiB 的暂存及压缩包 + 1 GiB 余量）；"
+            "请先检查 oopz-releases/ 备份和 Docker 占用"
+        )
+    return {"data_bytes": data_bytes, "free_bytes": free_bytes, "required_bytes": required_bytes}
+
+
 def upgrade(ref: str, *, profile: str | None, dry_run: bool) -> dict[str, Any]:
     ref = _validate_ref(ref)
     _require_clean_worktree()
     env_values = _required_environment(profile)
-    if shutil.disk_usage(ROOT).free < 1024 * 1024 * 1024:
-        raise RuntimeError("可用磁盘不足 1 GiB，拒绝升级")
+    disk_space = _check_upgrade_space()
     if shutil.which("docker") is None:
         raise RuntimeError("Docker/Compose 不可用")
     compose = ["docker", "compose"] + (["--profile", profile] if profile else [])
@@ -426,6 +450,7 @@ def upgrade(ref: str, *, profile: str | None, dry_run: bool) -> dict[str, Any]:
         "ref": ref,
         "profile": profile or "default",
         "dry_run": dry_run,
+        "disk_space": disk_space,
         "steps": ["backup", "fetch", "build", "switch", "health", "manifest"],
     }
     if dry_run:
@@ -437,6 +462,7 @@ def upgrade(ref: str, *, profile: str | None, dry_run: bool) -> dict[str, Any]:
     backup = RELEASE_DIR / f"pre-upgrade-{release_id}.zip"
     create_backup(ROOT / "data", backup, compose_file=ROOT / "compose.yaml")
     validate_archive(backup)
+    _check_upgrade_space(backup_pending=False)
     _run(["git", "fetch", "--no-tags", "origin", ref], timeout=120, check=True)
     new_sha = _git("rev-parse", "FETCH_HEAD", check=True)
     new_image_environment = _release_image_environment(new_sha)

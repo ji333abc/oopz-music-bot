@@ -1,7 +1,7 @@
 import asyncio as _asyncio
+import base64
 import os
 import queue
-import tempfile
 import threading
 import time
 from typing import Optional, Tuple
@@ -18,8 +18,7 @@ logger = get_logger("Voice")
 _PLAY_POLL_INTERVAL = 2
 _PLAY_POLL_TIMEOUT = 600
 _INIT_TIMEOUT_DEFAULT = 60
-_REMOTE_PLAY_START_TIMEOUT = 5
-_REMOTE_FAIL_SUPPRESS_SECONDS = 300
+_REMOTE_PLAY_START_TIMEOUT = 25
 
 _SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 _WEB_ASSETS_DIR = os.path.join(os.path.dirname(_SRC_DIR), "web", "assets")
@@ -80,8 +79,6 @@ class VoiceClient:
         self._identity_thread: Optional[threading.Thread] = None
         self._current_agora_uid: Optional[int] = None
         self._on_play_start_callback = None
-        self._remote_last_fail: float = 0
-        self._temp_audio_path: Optional[str] = None
 
         # 浏览器专用线程 + 任务队列；任务格式 (method, args, result_holder, error_holder, done_event, timeout)
         self._task_queue: queue.Queue = queue.Queue()
@@ -408,7 +405,7 @@ class VoiceClient:
         if not self._available:
             return
         self.stop_audio()
-        self._stop_event.clear()
+        self._stop_event = threading.Event()
         self._fallback_download_stop = threading.Event()
         self._on_play_start_callback = on_started
         fallback_url = fallback_url or url
@@ -422,30 +419,18 @@ class VoiceClient:
                 "fallback_url": fallback_url,
                 "audio_data": audio_data,
                 "content_type": content_type,
+                "stop_event": self._stop_event,
+                "download_stop": self._fallback_download_stop,
             },
             daemon=True,
         )
         self._play_thread.start()
 
     def preload_audio(self, url: str):
-        """后台预加载指定 URL 的音频，供下次 play_audio 直接使用，减少切歌时的下载延迟。"""
-        if not url or not self._available:
-            return
+        """保留兼容入口；URL 流式播放不预下载下一首音频。"""
         self._preload_stop.set()
-        self._preload_stop = threading.Event()
-        stop = self._preload_stop
-
-        def _task():
-            try:
-                data, content_type = self._download_audio_with_retry(url, stop_event=stop)
-                if data and not stop.is_set():
-                    with self._preload_lock:
-                        self._preloaded.clear()
-                        self._preloaded[url] = (data, content_type)
-                    logger.debug(f"预加载完成: {len(data)} bytes")
-            except Exception as e:
-                logger.debug(f"预加载失败（忽略）: {e}")
-        threading.Thread(target=_task, daemon=True).start()
+        with self._preload_lock:
+            self._preloaded.clear()
 
     def stop_audio(self):
         """停止当前音频推流。"""
@@ -521,12 +506,6 @@ class VoiceClient:
         self.leave()
         self._shutdown.set()
         self._task_queue.put(None)
-        if self._temp_audio_path:
-            try:
-                os.unlink(self._temp_audio_path)
-            except OSError:
-                pass
-            self._temp_audio_path = None
         logger.info("Agora 浏览器播放器已释放")
 
     def get_state(self) -> str:
@@ -601,35 +580,28 @@ class VoiceClient:
         fallback_url: Optional[str] = None,
         audio_data: Optional[bytes] = None,
         content_type: str = "audio/mpeg",
+        stop_event=None,
+        download_stop=None,
     ):
         """后台线程"""
+        stop_event = stop_event or self._stop_event
+        download_stop = download_stop or self._fallback_download_stop
+        callback = self._on_play_start_callback
+        if stop_event.is_set():
+            return
         self._playing = True
         try:
             started = False
             duration = 0.0
 
-            remote_suppressed = (
-                self._remote_last_fail > 0
-                and (time.monotonic() - self._remote_last_fail) < _REMOTE_FAIL_SUPPRESS_SECONDS
-            )
-
             if url:
-                if remote_suppressed:
-                    logger.info("远程推流近期失败，直接本地下载")
-                    if audio_data is None:
-                        audio_data, content_type = self._download_audio_with_retry(
-                            fallback_url or url,
-                            stop_event=self._fallback_download_stop,
-                        )
-                    if audio_data and not self._stop_event.is_set():
-                        started, duration = self._play_local_audio(audio_data, content_type)
-                else:
-                    started, duration = self._race_remote_and_local(
-                        url,
-                        fallback_url=fallback_url or url,
-                        fallback_audio=audio_data,
-                        fallback_content_type=content_type,
-                    )
+                started, duration = self._race_remote_and_local(
+                    url,
+                    fallback_url=fallback_url or url,
+                    fallback_audio=audio_data,
+                    fallback_content_type=content_type,
+                    stop_event=stop_event, download_stop=download_stop,
+                )
             elif audio_data is not None:
                 started, duration = self._play_local_audio(
                     audio_data,
@@ -637,22 +609,27 @@ class VoiceClient:
                     is_preloaded=True,
                 )
 
-            if started:
-                cb = self._on_play_start_callback
+            if started and not stop_event.is_set():
+                cb = callback
                 self._on_play_start_callback = None
                 if cb:
                     try:
                         cb()
                     except Exception as e:
                         logger.debug(f"on_play_start 回调异常: {e}")
-                self._monitor_playback(duration)
+                self._monitor_playback(duration, stop_event=stop_event)
 
         except http_requests.RequestException as e:
             logger.error(f"音频下载失败: {e}")
         except Exception as e:
             logger.error(f"Agora 推流异常: {e}")
         finally:
-            self._playing = False
+            if self._stop_event is stop_event:
+                try:
+                    self._run_on_browser("agoraStopAudio")
+                except Exception:
+                    pass
+                self._playing = False
 
     def _race_remote_and_local(
         self,
@@ -660,45 +637,29 @@ class VoiceClient:
         fallback_url: str,
         fallback_audio: Optional[bytes] = None,
         fallback_content_type: str = "audio/mpeg",
+        stop_event=None,
+        download_stop=None,
     ) -> Tuple[bool, float]:
-        """Chromium 直读高音质主链接，Python 同时准备低码率备用。"""
-        download_result: list = []
-        download_done = threading.Event()
-        download_stop = self._fallback_download_stop
-
-        def _bg_download():
-            try:
-                data, ct = self._download_audio_with_retry(
-                    fallback_url,
-                    stop_event=download_stop,
-                )
-                download_result.append((data, ct))
-            except Exception as e:
-                download_result.append((None, str(e)))
-            download_done.set()
-
-        if fallback_audio is not None:
-            download_result.append((fallback_audio, fallback_content_type))
-            download_done.set()
-        else:
-            dl_thread = threading.Thread(target=_bg_download, daemon=True)
-            dl_thread.start()
-
+        """先尝试 URL 流式播放，仅失败后下载备用音频到内存。"""
+        stop_event = stop_event or self._stop_event
+        download_stop = download_stop or self._fallback_download_stop
+        if stop_event.is_set():
+            return False, 0.0
         remote_ok, remote_dur = self._try_play_remote_url(url)
         if remote_ok:
-            download_stop.set()
             return True, remote_dur
-
-        download_done.wait()
-        if not download_result or self._stop_event.is_set():
+        if stop_event.is_set():
             return False, 0.0
-        audio_data, content_type = download_result[0]
-        if audio_data is None:
+        if fallback_audio is None:
+            fallback_audio, fallback_content_type = self._download_audio_with_retry(
+                fallback_url, stop_event=download_stop,
+            )
+        if not fallback_audio or stop_event.is_set():
             return False, 0.0
-        return self._play_local_audio(audio_data, content_type)
+        return self._play_local_audio(fallback_audio, fallback_content_type)
 
     def _try_play_remote_url(self, url: str) -> Tuple[bool, float]:
-        """让浏览器直接拉远程音频。失败则标记抑制后续尝试。"""
+        """让浏览器边拉取边推流；每首歌独立尝试。"""
         if self._stop_event.is_set():
             return False, 0.0
         try:
@@ -706,48 +667,23 @@ class VoiceClient:
             result = self._run_on_browser("agoraPlayAudio", url, timeout=_REMOTE_PLAY_START_TIMEOUT)
         except Exception as e:
             logger.warning(f"远程 URL 推流失败，回退本地下载: {e}")
-            self._remote_last_fail = time.monotonic()
             return False, 0.0
 
         if result and result.get("ok"):
-            self._remote_last_fail = 0
             duration = float(result.get("duration", 0) or 0)
             logger.info(f"Agora 远程直推已开始 (时长: {duration:.1f}s)")
             return True, duration
 
         err = result.get("error", "未知") if result else "无响应"
         logger.warning(f"远程 URL 推流不可用，回退本地下载: {err}")
-        self._remote_last_fail = time.monotonic()
         return False, 0.0
 
     def _play_local_audio(self, audio_data: bytes, content_type: str, is_preloaded: bool = False) -> Tuple[bool, float]:
-        """将已拿到的音频字节写入临时文件，让浏览器通过 file:// URL 播放。"""
-        logger.info(f"音频就绪: {len(audio_data)} bytes" + (" (预加载)" if is_preloaded else ""))
-        if "octet-stream" in (content_type or ""):
-            content_type = "audio/mpeg"
-
-        if self._temp_audio_path:
-            try:
-                os.unlink(self._temp_audio_path)
-            except OSError:
-                pass
-            self._temp_audio_path = None
-
-        ext = ".mp3" if "mpeg" in (content_type or "") else ".ogg"
-        fd, temp_path = tempfile.mkstemp(suffix=ext, prefix="agora_")
-        try:
-            with os.fdopen(fd, "wb") as f:
-                f.write(audio_data)
-        except Exception:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-            raise
-        self._temp_audio_path = temp_path
-
-        file_url = "file:///" + temp_path.replace("\\", "/")
-        result = self._run_on_browser("agoraPlayAudio", file_url)
+        """通过内存传输备用音频，不创建磁盘临时文件。"""
+        logger.info("备用音频就绪: %d bytes", len(audio_data))
+        result = self._run_on_browser(
+            "agoraPlayLocal", base64.b64encode(audio_data).decode("ascii"), content_type,
+        )
         if result and result.get("ok"):
             duration = float(result.get("duration", 0) or 0)
             logger.info(f"Agora 本地推流已开始 (时长: {duration:.1f}s)")
@@ -757,13 +693,14 @@ class VoiceClient:
         logger.warning(f"Agora 本地推流启动失败: {err}")
         return False, 0.0
 
-    def _monitor_playback(self, duration: float) -> None:
+    def _monitor_playback(self, duration: float, stop_event=None) -> None:
         """轮询浏览器播放状态，直到播放结束或超时。"""
         timeout = max(duration * 1.5 + 30, _PLAY_POLL_TIMEOUT) if duration > 0 else _PLAY_POLL_TIMEOUT
         poll_start = time.monotonic()
-        while not self._stop_event.is_set():
+        stop_event = stop_event or self._stop_event
+        while not stop_event.is_set():
             state = self.get_state()
-            if state == "finished":
+            if state in {"finished", "error"}:
                 logger.info("Agora 推流播放完成")
                 break
             if time.monotonic() - poll_start > timeout:
@@ -792,40 +729,45 @@ class VoiceClient:
             "Referer": "https://music.163.com/",
         })
 
-        last_error = None
-        content_type = "audio/mpeg"
-        for attempt in range(max_retries + 1):
-            if stop_event.is_set():
-                return None, content_type
-            try:
-                logger.info(f"正在下载音频 ({attempt + 1}/{max_retries + 1}): {url[:80]}...")
-                resp = session.get(
-                    url,
-                    timeout=(connect_timeout, read_timeout),
-                    stream=True,
-                )
-                resp.raise_for_status()
-                content_type = resp.headers.get("Content-Type") or "audio/mpeg"
+        try:
+            last_error = None
+            content_type = "audio/mpeg"
+            for attempt in range(max_retries + 1):
+                if stop_event.is_set():
+                    return None, content_type
+                try:
+                    logger.info(f"正在下载音频 ({attempt + 1}/{max_retries + 1}): {url[:80]}...")
+                    with session.get(
+                        url,
+                        timeout=(connect_timeout, read_timeout),
+                        stream=True,
+                    ) as resp:
+                        resp.raise_for_status()
+                        content_type = resp.headers.get("Content-Type") or "audio/mpeg"
+                        chunks = []
+                        received = 0
+                        for chunk in resp.iter_content(chunk_size=262144):
+                            if stop_event.is_set():
+                                return None, content_type
+                            if chunk:
+                                received += len(chunk)
+                                if received > 64 * 1024 * 1024:
+                                    raise RuntimeError("备用音频超过 64 MiB 内存限制")
+                                chunks.append(chunk)
+                        data = b"".join(chunks)
+                        if data:
+                            return data, content_type
+                except http_requests.RequestException as e:
+                    last_error = e
+                    logger.warning(f"音频下载尝试 {attempt + 1} 失败: {e}")
+                    if attempt < max_retries:
+                        backoff = 2 * (attempt + 1)
+                        logger.info(f"{backoff}s 后重试...")
+                        if stop_event.wait(backoff):
+                            return None, content_type
 
-                chunks = []
-                chunk_size = 262144
-                for chunk in resp.iter_content(chunk_size=chunk_size):
-                    if stop_event.is_set():
-                        resp.close()
-                        return None, content_type
-                    if chunk:
-                        chunks.append(chunk)
-                data = b"".join(chunks)
-                if data:
-                    return data, content_type
-            except http_requests.RequestException as e:
-                last_error = e
-                logger.warning(f"音频下载尝试 {attempt + 1} 失败: {e}")
-                if attempt < max_retries:
-                    backoff = 2 * (attempt + 1)
-                    logger.info(f"{backoff}s 后重试...")
-                    time.sleep(backoff)
-
-        if last_error:
-            raise last_error
-        return None, content_type
+            if last_error:
+                raise last_error
+            return None, content_type
+        finally:
+            session.close()

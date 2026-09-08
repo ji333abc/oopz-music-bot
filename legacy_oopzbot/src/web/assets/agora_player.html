@@ -21,6 +21,7 @@ window.WebSocket.CLOSED = _OrigWS.CLOSED;
 <script>
 let client = null;
 let audioTrack = null;
+let _playback = null;
 let _state = "idle";
 let _playGen = 0;
 let currentAgoraUid = null;
@@ -114,61 +115,112 @@ window.agoraSetVoiceState = async (micMuted, speakerMuted = currentSpeakerMuted)
   return await sendCurrentVoiceState(2);
 };
 
+// Each playback owns its media resources, including pending URL loads.
+async function releasePlayback(p) {
+  if (!p) return;
+  if (p.cancel) p.cancel();
+  if (p.element) {
+    p.element.onended = p.element.onerror = null;
+    p.element.pause();
+    p.element.removeAttribute("src");
+    p.element.load();
+  }
+  if (p.source) p.source.disconnect();
+  if (p.track) {
+    try { if (client) await client.unpublish([p.track]); } catch (_) {}
+    try { p.track.close(); } catch (_) {}
+  }
+  if (p.context) { try { await p.context.close(); } catch (_) {} }
+}
+
 window.agoraPlayAudio = async (url) => {
   const gen = ++_playGen;
+  const previous = _playback;
+  _playback = null;
+  audioTrack = null;
+  await releasePlayback(previous);
+  if (gen !== _playGen) return { ok: false, error: "superseded" };
+  const p = {};
+  _playback = p;
   try {
-    await window.agoraStopAudio();
-    const track = await AgoraRTC.createBufferSourceAudioTrack({
-      source: url,
-      cacheOnlineFile: false,
-      encoderConfig: "high_quality_stereo",
-    });
-    if (gen !== _playGen) {
-      try { track.close(); } catch(_){}
-      return { ok: false, error: "superseded" };
+    if (/^https?:\/\//i.test(url)) {
+      // HTMLMediaElement streams progressively instead of decoding the entire
+      // song before playback, as createBufferSourceAudioTrack does for a URL.
+      const element = p.element = new Audio();
+      element.crossOrigin = "anonymous";
+      element.preload = "none";
+      p.context = new AudioContext();
+      p.source = p.context.createMediaElementSource(element);
+      const destination = p.context.createMediaStreamDestination();
+      p.source.connect(destination);
+      p.track = AgoraRTC.createCustomAudioTrack({
+        mediaStreamTrack: destination.stream.getAudioTracks()[0],
+        encoderConfig: "high_quality_stereo",
+      });
+      p.track.setVolume(_currentVolume);
+      await p.context.resume();
+      if (gen !== _playGen) throw new Error("superseded");
+      await client.publish([p.track]);
+      if (gen !== _playGen) throw new Error("superseded");
+      await new Promise((resolve, reject) => {
+        const finish = (error) => {
+          clearTimeout(timer);
+          element.removeEventListener("playing", playing);
+          element.removeEventListener("error", failed);
+          p.cancel = null;
+          error ? reject(error) : resolve();
+        };
+        const playing = () => finish();
+        const failed = () => finish(new Error("remote audio load failed"));
+        const timer = setTimeout(() => finish(new Error("remote audio start timeout")), 20000);
+        p.cancel = () => finish(new Error("superseded"));
+        element.addEventListener("playing", playing);
+        element.addEventListener("error", failed);
+        element.src = url;
+        element.play().catch(finish);
+      });
+      element.onended = () => { if (gen === _playGen) _state = "finished"; };
+      element.onerror = () => { if (gen === _playGen) _state = "error"; };
+    } else {
+      p.track = await AgoraRTC.createBufferSourceAudioTrack({
+        source: url, cacheOnlineFile: false, encoderConfig: "high_quality_stereo",
+      });
+      if (gen !== _playGen) throw new Error("superseded");
+      p.track.setVolume(_currentVolume);
+      p.track.on("source-state-change", (st) => {
+        if (gen === _playGen) _state = st === "stopped" ? "finished" : st;
+      });
+      await client.publish([p.track]);
+      if (gen !== _playGen) throw new Error("superseded");
+      p.track.startProcessAudioBuffer({ loop: false });
     }
-    audioTrack = track;
-    try { audioTrack.setVolume(_currentVolume); } catch (_) {}
-    audioTrack.on("source-state-change", (st) => {
-      if (gen !== _playGen) return;
-      _state = st === "playing" ? "playing" : st === "stopped" ? "finished" : st;
-    });
-    audioTrack.startProcessAudioBuffer({ loop: false });
-    await client.publish([audioTrack]);
-    await sendCurrentVoiceState(2);
+    if (gen !== _playGen) throw new Error("superseded");
+    audioTrack = p.track;
     _state = "playing";
-    return { ok: true, duration: audioTrack.duration, agoraUid: currentAgoraUid };
+    await sendCurrentVoiceState(2);
+    if (gen !== _playGen) throw new Error("superseded");
+    const duration = p.element ? p.element.duration : p.track.duration;
+    return { ok: true, duration: Number.isFinite(duration) ? duration : 0, agoraUid: currentAgoraUid };
   } catch (e) {
-    if (gen !== _playGen) return { ok: false, error: "superseded" };
+    await releasePlayback(p);
+    if (gen === _playGen) {
+      _playback = null;
+      audioTrack = null;
+      _state = "joined";
+    }
     return { ok: false, error: e.message };
   }
 };
 
 window.agoraPlayLocal = async (base64Data, mimeType) => {
+  const binary = atob(base64Data);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const objectUrl = URL.createObjectURL(new Blob([bytes], { type: mimeType || "audio/mpeg" }));
   try {
-    await window.agoraStopAudio();
-    const binary = atob(base64Data);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    const blob = new Blob([bytes], { type: mimeType || "audio/mpeg" });
-    const objectUrl = URL.createObjectURL(blob);
-    audioTrack = await AgoraRTC.createBufferSourceAudioTrack({
-      source: objectUrl,
-      cacheOnlineFile: false,
-      encoderConfig: "high_quality_stereo",
-    });
-    try { audioTrack.setVolume(_currentVolume); } catch (_) {}
-    audioTrack.on("source-state-change", (st) => {
-      _state = st === "playing" ? "playing" : st === "stopped" ? "finished" : st;
-    });
-    audioTrack.startProcessAudioBuffer({ loop: false });
-    await client.publish([audioTrack]);
-    await sendCurrentVoiceState(2);
+    return await window.agoraPlayAudio(objectUrl);
+  } finally {
     URL.revokeObjectURL(objectUrl);
-    _state = "playing";
-    return { ok: true, duration: audioTrack.duration, agoraUid: currentAgoraUid };
-  } catch (e) {
-    return { ok: false, error: e.message };
   }
 };
 
@@ -188,16 +240,18 @@ window.agoraVoiceDebug = () => ({
 window.agoraPause = () => {
   if (!audioTrack || _state !== "playing") return { ok: false, error: "not playing" };
   try {
-    audioTrack.pauseProcessAudioBuffer();
+    if (_playback?.element) _playback.element.pause();
+    else audioTrack.pauseProcessAudioBuffer();
     _state = "paused";
     return { ok: true };
   } catch (e) { return { ok: false, error: e.message }; }
 };
 
-window.agoraResume = () => {
+window.agoraResume = async () => {
   if (!audioTrack || _state !== "paused") return { ok: false, error: "not paused" };
   try {
-    audioTrack.resumeProcessAudioBuffer();
+    if (_playback?.element) await _playback.element.play();
+    else audioTrack.resumeProcessAudioBuffer();
     _state = "playing";
     return { ok: true };
   } catch (e) { return { ok: false, error: e.message }; }
@@ -206,7 +260,8 @@ window.agoraResume = () => {
 window.agoraSeek = (time) => {
   if (!audioTrack) return { ok: false, error: "no track" };
   try {
-    audioTrack.seekAudioBuffer(time);
+    if (_playback?.element) _playback.element.currentTime = time;
+    else audioTrack.seekAudioBuffer(time);
     return { ok: true };
   } catch (e) { return { ok: false, error: e.message }; }
 };
@@ -223,18 +278,16 @@ window.agoraSetVolume = (vol) => {
 
 window.agoraGetCurrentTime = () => {
   if (!audioTrack) return 0;
-  try { return audioTrack.getCurrentTime(); } catch (_) { return 0; }
+  try { return _playback?.element ? _playback.element.currentTime : audioTrack.getCurrentTime(); } catch (_) { return 0; }
 };
 
 window.agoraStopAudio = async () => {
-  if (!audioTrack) return;
-  try {
-    audioTrack.stopProcessAudioBuffer();
-    if (client) await client.unpublish([audioTrack]);
-    audioTrack.close();
-  } catch (_) {}
+  ++_playGen;
+  const previous = _playback;
+  _playback = null;
   audioTrack = null;
   _state = "joined";
+  await releasePlayback(previous);
 };
 
 window.agoraLeave = async () => {

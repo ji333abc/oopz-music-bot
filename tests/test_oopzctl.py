@@ -11,6 +11,22 @@ from scripts import oopzctl
 
 
 class OopzctlTests(unittest.TestCase):
+    def test_space_check_includes_backup_staging_and_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            (root / "data").mkdir()
+            (root / "data" / "audio.bin").write_bytes(b"x" * 1024)
+            reserve = 1024 ** 3
+            with patch.object(oopzctl, "ROOT", root), patch.object(
+                oopzctl.shutil, "disk_usage",
+                return_value=type("Usage", (), {"free": reserve + 1024})(),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "暂存及压缩包"):
+                    oopzctl._check_upgrade_space()
+                # Once staging is gone, only the remaining build headroom is checked.
+                result = oopzctl._check_upgrade_space(backup_pending=False)
+                self.assertEqual(result["required_bytes"], reserve)
+
     def test_diagnose_bundle_is_bounded_and_excludes_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             output = Path(name) / "diagnose.zip"

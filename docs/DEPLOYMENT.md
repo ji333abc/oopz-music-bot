@@ -37,6 +37,14 @@ docker compose up -d
 ./oopzctl upgrade --ref main
 ```
 
+磁盘预检查会估算 `data/` 暂存副本、压缩包及 1 GiB 余量，并在备份完成后重新检查。
+这是备份空间估算，不是 Docker 构建或 Redis 快照大小的保证。空间不足时先运行
+`df -h .`、`du -sh data oopz-releases` 和 `docker system df` 确认占用来源。
+`docker builder prune -af` 可释放未使用的构建缓存，但后续构建可能变慢。
+`./oopzctl releases prune --keep 2` 只清理旧成功回滚记录及对应备份，保留最近两个；
+不要用删除 `data/` 或 Docker 数据卷的方式腾空间。`docker image prune -a` 会删除
+未被容器引用的历史版本镜像，可能使历史回滚需要重新构建，执行前需明确接受此影响。
+
 升级会拒绝 dirty worktree、过宽的 `.env` 权限和 JM 开关/Profile 不一致，先创建并校验 data + Redis 备份；每个提交使用唯一 Bot/Panel/QQMusic/JM 镜像标签。readyz、Panel 容器健康和配置的公网 `/api/health` 任一失败时，只恢复 manifest 记录的旧代码/旧镜像，不自动覆盖数据。回滚使用 `./oopzctl rollback --release <ID>`。旧回滚点只由显式 `releases prune` 删除，且至少保留最近两个成功版本。
 
 停止：
