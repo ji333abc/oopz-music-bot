@@ -5,18 +5,21 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import re
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from collections import deque
 from urllib.error import URLError
 from urllib.parse import urlsplit
 from urllib.request import urlopen
@@ -44,7 +47,11 @@ def _run(
     timeout: int = 30,
     check: bool = False,
     environment: dict[str, str] | None = None,
+    on_output=None,
 ) -> subprocess.CompletedProcess:
+    if on_output is not None:
+        return _run_streamed(args, timeout=timeout, check=check,
+                             environment=environment, on_output=on_output)
     result = subprocess.run(
         args,
         cwd=ROOT,
@@ -57,6 +64,111 @@ def _run(
     if check and result.returncode:
         raise RuntimeError((result.stderr or result.stdout or "命令失败").strip()[-1000:])
     return result
+
+
+def _run_streamed(args, *, timeout, check, environment, on_output):
+    """Drain output while running; retain only a bounded tail for failures."""
+    pending = queue.Queue(maxsize=256)
+    tail = deque(maxlen=64)
+    stopped = threading.Event()
+    with subprocess.Popen(
+        args, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace",
+        env={**os.environ, **(environment or {})},
+    ) as process:
+        def read_output():
+            try:
+                for line in iter(lambda: process.stdout.readline(8192), ""):
+                    while not stopped.is_set():
+                        try:
+                            pending.put(line, timeout=0.1)
+                            break
+                        except queue.Full:
+                            continue
+                    if stopped.is_set():
+                        break
+            finally:
+                stopped.set()
+
+        reader = threading.Thread(target=read_output, daemon=True)
+        reader.start()
+        deadline = time.monotonic() + timeout
+        try:
+            while not (stopped.is_set() and pending.empty() and process.poll() is not None):
+                if time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(args, timeout)
+                try:
+                    line = pending.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                line = _redact(line).rstrip()
+                tail.append(line)
+                on_output(line)
+            result = subprocess.CompletedProcess(args, process.wait(), "\n".join(tail), "")
+        finally:
+            stopped.set()
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            reader.join(timeout=1)
+    if check and result.returncode:
+        raise RuntimeError(result.stdout[-1000:] or "命令失败")
+    return result
+
+
+class UpgradeProgress:
+    """Stage completion, not an estimated fraction of build time."""
+
+    total = 8
+
+    def __init__(self):
+        self.output = sys.stderr
+        self.tty = self.output.isatty()
+        self.lock = threading.Lock()
+        self.done = threading.Event()
+        self.started = time.monotonic()
+        self.completed = 0
+        self.label = "预检查"
+
+    def _draw(self):
+        bar = "#" * self.completed + "-" * (self.total - self.completed)
+        elapsed = int(time.monotonic() - self.started)
+        line = f"[{bar}] 阶段 {self.completed}/{self.total} | {self.label} | 已用 {elapsed}s"
+        print(("\r\033[2K" if self.tty else "") + line,
+              file=self.output, end="" if self.tty else "\n", flush=True)
+
+    def step(self, completed, label):
+        with self.lock:
+            self.completed, self.label = completed, label
+            self._draw()
+
+    def log(self, line):
+        with self.lock:
+            if self.tty:
+                print("\r\033[2K", file=self.output, end="")
+            print(line, file=self.output, flush=True)
+            if self.tty:
+                self._draw()
+
+    def __enter__(self):
+        self.step(0, "预检查")
+        def heartbeat():
+            while not self.done.wait(1 if self.tty else 10):
+                with self.lock:
+                    self._draw()
+        self.thread = threading.Thread(target=heartbeat, daemon=True)
+        self.thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        self.done.set()
+        self.thread.join(timeout=1)
+        with self.lock:
+            if exc is not None:
+                self.label = f"失败：{self.label}；{_redact(exc)}"
+                self._draw()
+            if self.tty:
+                print(file=self.output, flush=True)
 
 
 def _git(*args: str, check: bool = False) -> str:
@@ -433,6 +545,11 @@ def _check_upgrade_space(*, backup_pending: bool = True) -> dict[str, int]:
 
 
 def upgrade(ref: str, *, profile: str | None, dry_run: bool) -> dict[str, Any]:
+    with UpgradeProgress() as progress:
+        return _upgrade(ref, profile=profile, dry_run=dry_run, progress=progress)
+
+
+def _upgrade(ref: str, *, profile: str | None, dry_run: bool, progress) -> dict[str, Any]:
     ref = _validate_ref(ref)
     _require_clean_worktree()
     env_values = _required_environment(profile)
@@ -455,31 +572,41 @@ def upgrade(ref: str, *, profile: str | None, dry_run: bool) -> dict[str, Any]:
     }
     if dry_run:
         _run(["docker", "compose", "config", "--quiet"], check=True)
+        progress.step(1, "预检查通过（dry-run，未执行升级）")
         return plan
 
+    progress.step(1, "备份 data 和 Redis")
     RELEASE_DIR.mkdir(parents=True, exist_ok=True)
     release_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     backup = RELEASE_DIR / f"pre-upgrade-{release_id}.zip"
     create_backup(ROOT / "data", backup, compose_file=ROOT / "compose.yaml")
+    progress.step(2, "校验备份和剩余空间")
     validate_archive(backup)
     _check_upgrade_space(backup_pending=False)
-    _run(["git", "fetch", "--no-tags", "origin", ref], timeout=120, check=True)
+    progress.step(3, "拉取目标版本")
+    _run(["git", "fetch", "--no-tags", "origin", ref], timeout=120, check=True,
+         on_output=progress.log)
     new_sha = _git("rev-parse", "FETCH_HEAD", check=True)
     new_image_environment = _release_image_environment(new_sha)
     try:
+        progress.step(4, "切换代码并构建镜像")
         _run(["git", "switch", "--detach", new_sha], check=True)
         _run(
             [*compose, "build"],
             timeout=3600,
             check=True,
-            environment=new_image_environment,
+            environment={**new_image_environment, "BUILDKIT_PROGRESS": "plain"},
+            on_output=progress.log,
         )
+        progress.step(5, "启动服务")
         _run(
             [*compose, "up", "-d"],
             timeout=300,
             check=True,
             environment=new_image_environment,
+            on_output=progress.log,
         )
+        progress.step(6, "等待 Bot、Panel 和公网健康检查")
         _verify_services(
             compose,
             new_image_environment,
@@ -487,6 +614,7 @@ def upgrade(ref: str, *, profile: str | None, dry_run: bool) -> dict[str, Any]:
         )
         health = "ok"
     except Exception as exc:
+        progress.step(progress.completed, "升级失败，正在回滚旧版本")
         rollback_health = "failed"
         try:
             _run(["git", "switch", "--detach", old_sha], check=True)
@@ -495,6 +623,7 @@ def upgrade(ref: str, *, profile: str | None, dry_run: bool) -> dict[str, Any]:
                 timeout=300,
                 check=True,
                 environment=old_image_environment,
+                on_output=progress.log,
             )
             _verify_services(
                 compose,
@@ -502,6 +631,7 @@ def upgrade(ref: str, *, profile: str | None, dry_run: bool) -> dict[str, Any]:
                 public_url=env_values.get("OOPZ_PANEL_PUBLIC_URL", ""),
             )
             rollback_health = "ok"
+            progress.step(progress.completed, "旧版本已恢复，升级未完成")
         finally:
             failure_manifest = {
                 **plan,
@@ -522,6 +652,7 @@ def upgrade(ref: str, *, profile: str | None, dry_run: bool) -> dict[str, Any]:
                 encoding="utf-8",
             )
         raise
+    progress.step(7, "保存升级记录")
     manifest = {
         **plan,
         "release_id": release_id,
@@ -539,6 +670,7 @@ def upgrade(ref: str, *, profile: str | None, dry_run: bool) -> dict[str, Any]:
     (RELEASE_DIR / f"{release_id}.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+    progress.step(8, "升级完成")
     return manifest
 
 

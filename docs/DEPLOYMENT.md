@@ -37,6 +37,11 @@ docker compose up -d
 ./oopzctl upgrade --ref main
 ```
 
+升级时默认显示阶段进度条、当前操作和耗时，Git/Docker 构建日志实时输出。
+进度表示已完成的阶段数，不代表精确剩余时间；备份、构建和健康等待期间会持续更新耗时。
+进度及日志写入 stderr，stdout 仍是最终 JSON；重定向到文件时以普通日志行记录。
+`--dry-run` 只显示预检查通过，不会显示升级完成。
+
 磁盘预检查会估算 `data/` 暂存副本、压缩包及 1 GiB 余量，并在备份完成后重新检查。
 这是备份空间估算，不是 Docker 构建或 Redis 快照大小的保证。空间不足时先运行
 `df -h .`、`du -sh data oopz-releases` 和 `docker system df` 确认占用来源。
