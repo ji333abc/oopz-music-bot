@@ -6,6 +6,7 @@ const crypto = require("node:crypto");
 const { createRequire } = require("node:module");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+const { createSearchMiddleware } = require("./qqmusic_search.cjs");
 
 const serviceDirectory = path.resolve(process.argv[2] || "");
 if (!serviceDirectory) {
@@ -208,6 +209,9 @@ async function loadApplication() {
 
 (async () => {
   const app = await loadApplication();
+  app.middleware.unshift(createSearchMiddleware({
+    getCookie: () => String(global.userInfo?.cookie || rainConfig?.userInfo?.cookie || process.env.QQ_MUSIC_COOKIE || ""),
+  }));
 
   const server = app.listen(port, host, () => {
     console.log(`QQ Music API listening on http://${host}:${port}`);

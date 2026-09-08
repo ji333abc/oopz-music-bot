@@ -1,4 +1,5 @@
 from typing import Optional
+from oopzbot.application.search_cache import SearchDependencyError
 
 from app.services.runtime import CommandRuntimeView, music_of, sender_of
 from music.music import parse_platform_prefix
@@ -86,7 +87,11 @@ class MusicCommandService:
         if fast_result and self._is_confident_match(clean_kw, [fast_result]):
             self._music.play_song_choice(dict(fast_result, platform=resolved_platform), channel, area, user)
             return
-        results = self._music.search_candidates(clean_kw, resolved_platform, limit=5)
+        try:
+            results = self._music.search_candidates(clean_kw, resolved_platform, limit=5)
+        except SearchDependencyError as exc:
+            self._sender.send_message(str(exc), channel=channel, area=area)
+            return
         if not results:
             self._sender.send_message(f"未找到: {clean_kw}", channel=channel, area=area)
             return
@@ -106,7 +111,11 @@ class MusicCommandService:
         if not self._interactive_enabled():
             self._play_direct(keyword, channel, area, user)
             return
-        results = self._music.search_candidates(clean_kw, resolved_platform, limit=5)
+        try:
+            results = self._music.search_candidates(clean_kw, resolved_platform, limit=5)
+        except SearchDependencyError as exc:
+            self._sender.send_message(str(exc), channel=channel, area=area)
+            return
         if not results:
             self._sender.send_message(f"未找到: {clean_kw}", channel=channel, area=area)
             return

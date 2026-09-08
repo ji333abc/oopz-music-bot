@@ -13,6 +13,7 @@ LABEL org.opencontainers.image.source="https://github.com/sansenjian/qq-music-ap
 WORKDIR /opt/qqmusic-api
 COPY --from=build /opt/qqmusic-api ./
 COPY oopzbot/qqmusic_launcher.cjs /opt/oopzbot/qqmusic_launcher.cjs
+COPY oopzbot/qqmusic_search.cjs /opt/oopzbot/qqmusic_search.cjs
 
 ENV PORT=3200 \
     QQ_MUSIC_HOST=0.0.0.0 \

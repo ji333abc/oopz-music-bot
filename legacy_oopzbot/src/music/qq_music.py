@@ -13,6 +13,7 @@ from core.http_constants import HTTP_TIMEOUT_DEFAULT
 from core.logger_config import get_logger
 
 from oopzbot.metrics import metrics
+from oopzbot.application.search_cache import SearchDependencyError
 
 logger = get_logger("QQMusic")
 
@@ -211,13 +212,6 @@ class QQMusic:
         songs = self._extract_songs(data or {})
 
         if not songs:
-            data = self._get(
-                "/search",
-                params={"key": keyword, "limit": limit, "page": 1},
-            )
-            songs = self._extract_songs(data or {})
-
-        if not songs:
             return None
         return self._parse_song(songs[0])
 
@@ -232,14 +226,9 @@ class QQMusic:
             "/getSearchByKey",
             params={"key": keyword, "limit": limit, "page": page},
         )
+        if data is None and self.last_error:
+            raise SearchDependencyError(self.last_error["message"])
         songs = self._extract_songs(data or {})
-
-        if not songs:
-            data = self._get(
-                "/search",
-                params={"key": keyword, "limit": limit, "page": page},
-            )
-            songs = self._extract_songs(data or {})
 
         return [
             parsed
@@ -356,9 +345,10 @@ class QQMusic:
     def summarize(self, keyword: str) -> dict:
         song = self.search(keyword)
         if not song:
+            error = self.last_error
             return {
                 "code": "error",
-                "message": f"QQ音乐未找到: {keyword}",
+                "message": error["message"] if error else f"QQ音乐未找到: {keyword}",
                 "data": None,
             }
         mid = song.get("mid") or song.get("id")

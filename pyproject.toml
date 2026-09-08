@@ -68,7 +68,7 @@ include = ["oopzbot*", "legacy_oopzbot*"]
 version = {attr = "oopzbot.__version__"}
 
 [tool.setuptools.package-data]
-oopzbot = ["env.example", "qqmusic_launcher.cjs"]
+oopzbot = ["env.example", "qqmusic_launcher.cjs", "qqmusic_search.cjs"]
 "legacy_oopzbot.src.web" = ["assets/**/*"]
 
 [tool.ruff]

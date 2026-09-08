@@ -14,6 +14,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from core.logger_config import get_logger
+from oopzbot.application.search_cache import SearchDependencyError
 
 logger = get_logger("QQBotBridge")
 router = APIRouter()
@@ -1085,6 +1086,8 @@ async def qqbot_command(request: Request):
         requester_key = f"{group_openid}:{requester_id}"
         result = await asyncio.to_thread(_execute_command, command, requester_key)
         return JSONResponse(result)
+    except SearchDependencyError as exc:
+        return JSONResponse({"ok": False, "error_kind": "dependency", "message": str(exc)})
     except Exception as exc:
         logger.exception("执行 QQBot 桥接命令失败")
         return JSONResponse(
