@@ -13,6 +13,10 @@ from typing import Any
 SearchKey = tuple[str, str, int, int]
 
 
+class SearchDependencyError(RuntimeError):
+    """An upstream search failed, rather than returning an empty result."""
+
+
 def normalize_search_keyword(value: object) -> str:
     return " ".join(str(value or "").strip().split())
 

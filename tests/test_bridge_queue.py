@@ -502,6 +502,21 @@ class QueuePanelTests(unittest.TestCase):
 
 
 class SearchResultTests(unittest.TestCase):
+    def test_search_failure_preserves_dependency_message(self) -> None:
+        from oopzbot.application.search_cache import SearchDependencyError
+        music = _FakeMusic()
+        with patch.object(music, "search_candidates", side_effect=SearchDependencyError("QQ音乐接口请求超时，请稍后重试")):
+            result = bridge._search_songs(music, "雨爱", "group:user")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_kind"], "dependency")
+        self.assertIn("超时", result["message"])
+
+    def test_empty_search_has_not_found_category(self) -> None:
+        music = _FakeMusic()
+        with patch.object(music, "search_candidates", return_value=[]):
+            result = bridge._search_songs(music, "雨爱", "group:user")
+        self.assertEqual(result["error_kind"], "not_found")
+
     def test_platform_prefix_parser_preserves_legacy_aliases(self) -> None:
         self.assertEqual(parse_platform_keyword("QQ: 周杰伦"), ("qq", "周杰伦"))
         self.assertEqual(parse_platform_keyword("b站：稻香"), ("bilibili", "稻香"))

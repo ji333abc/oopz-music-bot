@@ -5,6 +5,7 @@ import time
 import unittest
 
 from oopzbot.config import Settings
+from oopzbot.application.search_cache import SearchDependencyError
 from oopzbot.controller import MusicController, MusicQueue
 from oopzbot.infrastructure.queue_adapter import LegacyQueueAdapter
 
@@ -237,8 +238,9 @@ class MusicControllerTests(unittest.TestCase):
         music = _FailedSearchMusic()
         self.controller.platforms["qq"] = music
 
-        self.controller.search_candidates("same", "qq", limit=5)
-        self.controller.search_candidates("same", "qq", limit=5)
+        for _ in range(2):
+            with self.assertRaises(SearchDependencyError):
+                self.controller.search_candidates("same", "qq", limit=5)
 
         self.assertEqual(music.search_calls, 2)
 

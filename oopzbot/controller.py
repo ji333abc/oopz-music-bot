@@ -7,7 +7,7 @@ import threading
 import time
 from collections import deque
 
-from .application.search_cache import SearchCache
+from .application.search_cache import SearchCache, SearchDependencyError
 from .config import Settings
 from .music import QQMusic
 from .runtime import NameFacade, OopzRuntime, SenderFacade, VoiceFacade
@@ -232,12 +232,13 @@ class MusicController:
         if adapter is None:
             return []
         normalized_limit = max(1, min(int(limit), 10))
-        load_failed = False
 
         def load() -> list[dict]:
-            nonlocal load_failed
             value = adapter.search_many(keyword, limit=normalized_limit)
-            load_failed = bool(getattr(adapter, "last_error", None))
+            if getattr(adapter, "last_error", None):
+                raise SearchDependencyError(
+                    adapter.last_error.get("message") or "音乐搜索接口请求失败，请稍后重试"
+                )
             return value
 
         return self.search_cache.search(
@@ -245,7 +246,6 @@ class MusicController:
             keyword,
             limit=normalized_limit,
             loader=load,
-            cacheable=lambda _value: not load_failed,
         )
 
     def _build_song_data_from_platform_data(
@@ -324,11 +324,11 @@ class MusicController:
         return resolved
 
     def play_song(self, keyword: str, platform: str, channel: str, area: str, user: str) -> dict:
-        results = self.search_candidates(keyword, platform, limit=1)
+        try:
+            results = self.search_candidates(keyword, platform, limit=1)
+        except SearchDependencyError as exc:
+            return {"code": "error", "error_kind": "dependency", "message": str(exc)[:240]}
         if not results:
-            failure = getattr(self.platforms.get(platform), "last_error", None)
-            if isinstance(failure, dict) and failure.get("message"):
-                return {"code": "error", "message": str(failure["message"])[:240]}
             return {"code": "error", "message": f"未找到歌曲：{keyword}"}
         return self.play_song_choice(results[0], channel, area, user)
 

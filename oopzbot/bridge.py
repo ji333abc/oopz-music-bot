@@ -16,6 +16,7 @@ import requests
 from . import health as _health
 from .application.command_service import CommandService
 from .application.playback_service import PlaybackService
+from .application.search_cache import SearchDependencyError
 from .application.queue_service import QueueConflictError, QueuePositionError, QueueService
 from .commands.formatter import format_queue, format_search, format_seconds
 from .commands.oopz import backend_notifies as _oopz_backend_notifies
@@ -1072,9 +1073,12 @@ def _search_songs(
     if len(keyword) > 100:
         return {"ok": False, "message": "搜索关键词过长"}
 
-    results = music.search_candidates(keyword, platform, limit=10)
+    try:
+        results = music.search_candidates(keyword, platform, limit=10)
+    except SearchDependencyError as exc:
+        return {"ok": False, "error_kind": "dependency", "message": str(exc)}
     if not results:
-        return {"ok": False, "message": f"QQ音乐未找到：{keyword}"}
+        return {"ok": False, "error_kind": "not_found", "message": f"QQ音乐未找到：{keyword}"}
 
     songs = [dict(song, platform=platform) for song in results[:10]]
     _search_sessions.put(requester_key, songs=songs)
