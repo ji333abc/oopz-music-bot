@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 import zipfile
@@ -71,6 +72,7 @@ class OopzctlTests(unittest.TestCase):
                 "QQBOT_BRIDGE_TOKEN=test\nOOPZ_PANEL_PASSWORD=test\n",
                 encoding="utf-8",
             )
+            (root / ".env").chmod(0o600)
             (root / "data").mkdir()
             release_dir = root / "oopz-releases"
             commands = []
@@ -155,6 +157,7 @@ class OopzctlTests(unittest.TestCase):
                     "QQBOT_BRIDGE_TOKEN=test\nOOPZ_PANEL_PASSWORD=test\n",
                     encoding="utf-8",
                 )
+                (root / ".env").chmod(0o600)
                 (root / "data").mkdir()
                 release_dir = root / "oopz-releases"
                 commands = []
@@ -237,6 +240,7 @@ class OopzctlTests(unittest.TestCase):
             env_path = root / ".env"
             with patch.object(oopzctl, "ROOT", root):
                 env_path.write_text("QQBOT_BRIDGE_TOKEN=test\n", encoding="utf-8")
+                env_path.chmod(0o600)
                 with self.assertRaisesRegex(RuntimeError, "OOPZ_PANEL_PASSWORD"):
                     oopzctl._required_environment(None)
 
@@ -248,6 +252,22 @@ class OopzctlTests(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(RuntimeError, "Profile"):
                     oopzctl._required_environment(None)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX file permissions required")
+    def test_preflight_rejects_readable_secrets_until_permissions_are_restricted(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            env_path = root / ".env"
+            env_path.write_text(
+                "QQBOT_BRIDGE_TOKEN=test\nOOPZ_PANEL_PASSWORD=test\n",
+                encoding="utf-8",
+            )
+            env_path.chmod(0o644)
+            with patch.object(oopzctl, "ROOT", root):
+                with self.assertRaisesRegex(RuntimeError, "0600"):
+                    oopzctl._required_environment(None)
+                env_path.chmod(0o600)
+                self.assertEqual(oopzctl._required_environment(None)["OOPZ_PANEL_PASSWORD"], "test")
 
     def test_release_prune_keeps_two_and_only_removes_scoped_backups(self) -> None:
         with tempfile.TemporaryDirectory() as name:
