@@ -16,12 +16,13 @@ import requests
 from . import health as _health
 from .application.command_service import CommandService
 from .application.playback_service import PlaybackService
-from .application.search_cache import SearchDependencyError
 from .application.queue_service import QueueConflictError, QueuePositionError, QueueService
+from .application.search_cache import SearchDependencyError
 from .commands.formatter import format_queue, format_search, format_seconds
 from .commands.oopz import backend_notifies as _oopz_backend_notifies
 from .commands.oopz import normalize_oopz_music_command as _modern_oopz_music_command
 from .commands.parser import (
+    bilibili_request,
     matches_play_command,
     matches_search_command,
     parse_platform_keyword,
@@ -99,6 +100,7 @@ _HELP_MESSAGE = """Music-bot 使用帮助
 
 🎵 音乐播放
 ├─ 点歌 <歌名> / 播放 <歌名>
+├─ b站 <BV号或视频链接> —— 播放视频音轨，支持 ?p=2
 ├─ 搜歌 <关键词>
 │  └─ 选歌 <编号>（结果保留5分钟）
 ├─ 状态 —— 当前歌曲、进度和在线人数
@@ -1668,7 +1670,20 @@ def _execute_command_impl(request: CommandRequest) -> dict:
         if matches_play_command(command):
             platform, keyword = parse_platform_keyword(play_value)
             if not keyword:
-                return {"ok": False, "message": "请输入歌名，例如：播放 海阔天空"}
+                example = "用法：b站 BV号或视频链接" if bilibili_request(command) is not None else "请输入歌名，例如：播放 海阔天空"
+                return {"ok": False, "message": example}
+            if platform == "bilibili" and (
+                bilibili_request(command) is not None
+                or keyword.startswith(("http://", "https://", "BV", "bv"))
+            ):
+                from .bilibili import video_id
+
+                try:
+                    keyword = video_id(keyword)
+                except ValueError as exc:
+                    return {"ok": False, "message": str(exc)}
+                if not music.platforms.get("bilibili"):
+                    return {"ok": False, "message": "B站音源未启用，请设置 BILIBILI_MUSIC_ENABLED=true"}
             if len(keyword) > 100:
                 return {"ok": False, "message": "歌曲关键词过长"}
 
@@ -1695,10 +1710,11 @@ def _execute_command_impl(request: CommandRequest) -> dict:
                 requester_id=music_requester,
             )
             if not play_result.ok:
-                return {"ok": False, "message": play_result.message}
+                return {"ok": False, "message": play_result.message, "backend_notified": True}
             return {
                 "ok": True,
                 "message": play_result.message,
+                "backend_notified": True,
             }
 
         if command_kind is CommandKind.NEXT:
@@ -2020,6 +2036,8 @@ def dispatch_oopz_music_command(
     _command_event(normalized, payload, "OOPZ")
 
     backend_notified = _oopz_backend_notifies(normalized)
+    if matches_play_command(normalized) and parse_platform_keyword(play_keyword(normalized))[0] == "bilibili":
+        backend_notified = bool(payload.get("backend_notified"))
     if normalized.startswith("专辑点歌"):
         backend_notified = bool(payload.get("backend_notified"))
     if not backend_notified:

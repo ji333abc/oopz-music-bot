@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from urllib.parse import parse_qs
 
 from oopzbot.domain.contracts import QueueSnapshot, SongCandidate
 
@@ -13,6 +14,30 @@ def format_seconds(value: object) -> str:
     except (TypeError, ValueError):
         seconds = 0
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+
+def format_bilibili_request(song: Mapping, *, queue_position: int | None = None) -> str:
+    identifier = str(song.get("song_id") or song.get("id") or "")
+    bvid, _, query = identifier.partition("?")
+    page = parse_qs(query).get("p", ["1"])[0]
+    duration = song.get("durationText") or song.get("duration")
+    if not isinstance(duration, str) or ":" not in duration:
+        try:
+            seconds = float(song.get("duration_ms") or duration or 0) / 1000
+        except (TypeError, ValueError):
+            seconds = 0
+        duration = format_seconds(seconds)
+    status = "已提交播放" if queue_position is None else "已加入队列"
+    text = (
+        f"📺 B站音源 · {status}\n\n"
+        f"标题：{song.get('name') or '未知视频'}\n"
+        f"UP主：{song.get('artists') or '未知UP主'}\n"
+        f"时长：{duration}\n"
+        f"视频：{bvid} · 第{page}P"
+    )
+    if queue_position is not None:
+        text += f"\n队列位置：{queue_position}"
+    return text
 
 
 def format_queue(snapshot: QueueSnapshot) -> str:

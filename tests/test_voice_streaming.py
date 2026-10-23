@@ -1,11 +1,10 @@
 import base64
 import importlib.util
-from pathlib import Path
 import sys
 import threading
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
-
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "legacy_oopzbot/src"))

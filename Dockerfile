@@ -15,7 +15,7 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY pyproject.toml README.md LICENSE ./
+COPY pyproject.toml README.md LICENSE LICENSE.bili-music ./
 COPY oopzbot ./oopzbot
 COPY legacy_oopzbot ./legacy_oopzbot
 COPY docker-entrypoint.sh /usr/local/bin/oopzbot-entrypoint

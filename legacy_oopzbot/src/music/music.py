@@ -26,6 +26,7 @@ from oopz.oopz_sender import OopzSender
 from web.web_link_token import clear_token, get_token, set_active_area
 
 from oopzbot.application.search_cache import SearchCache
+from oopzbot.commands.formatter import format_bilibili_request
 from oopzbot.config import get_settings
 
 logger = get_logger("Music")
@@ -555,7 +556,7 @@ class MusicHandler(PlaybackMixin):
             "name": data["name"],
             "artists": data["artists"],
             "album": data.get("album", ""),
-            "url": data["url"],
+            "url": data.get("url", ""),
             "cover": data.get("cover"),
             "duration": duration_text,
             "duration_ms": duration_ms,
@@ -580,7 +581,12 @@ class MusicHandler(PlaybackMixin):
             return {"code": "error", "message": message}
 
         data = None
-        if song.get("url"):
+        if platform == "bilibili":
+            result = p.summarize_by_id(song_id)
+            if result.get("code") != "success":
+                return result
+            data = result["data"]
+        elif song.get("url"):
             data = dict(song)
         elif song.get("name") and song.get("artists"):
             try:
@@ -1103,7 +1109,7 @@ class MusicHandler(PlaybackMixin):
     ) -> dict | None:
         """Resolve a fresh play URL when a queued album track reaches the head."""
         resolved = dict(song)
-        if resolved.get("url"):
+        if resolved.get("url") and resolved.get("platform") != "bilibili":
             return resolved
         platform_name = str(resolved.get("platform") or _PLATFORM_NETEASE)
         platform = self.platforms.get(platform_name)
@@ -1133,6 +1139,9 @@ class MusicHandler(PlaybackMixin):
         """根据播放模式决定下一首歌。"""
         mode = self.get_play_mode()
         if natural_end and mode == PLAY_MODE_SINGLE and current_song:
+            if current_song.get("platform") == "bilibili":
+                resolved = self._resolve_queued_song(current_song)
+                return resolved, PLAY_MODE_SINGLE if resolved else "queue_unavailable"
             return copy.deepcopy(current_song), PLAY_MODE_SINGLE
         skipped = 0
         if mode == PLAY_MODE_SHUFFLE and hasattr(self.queue, "pop_random"):
@@ -1379,9 +1388,9 @@ class MusicHandler(PlaybackMixin):
             image_cache_id = ImageCache.save(song_id, platform, cover, att)
         return attachments, image_cache_id, cache_hit
 
-    def _build_song_request_text(self, song_data: dict, prefix: str = "") -> str:
+    def _build_song_request_text(self, song_data: dict, prefix: str = "", queue_position: int | None = None) -> str:
         """统一构建点歌通知文本。prefix 为空时使用默认的 'XXX 点播了' 格式。"""
-        if not prefix:
+        if not prefix and song_data.get("platform") != "bilibili":
             user_name = self.names.user(song_data.get("user", "")) if song_data.get("user") else "未知用户"
             prefix = f"{user_name} 点播了"
 
@@ -1391,14 +1400,17 @@ class MusicHandler(PlaybackMixin):
             "bilibili": "B站",
         }.get(song_data.get("platform"), "网易云")
 
-        text = (
-            f"{prefix}:\n"
-            f"来自于{platform_name}:\n"
-            f"歌曲: {song_data['name']}\n"
-            f"歌手: {song_data['artists']}\n"
-            f"专辑: {song_data['album']}\n"
-            f"时长: {song_data['duration']}"
-        )
+        if song_data.get("platform") == "bilibili":
+            text = format_bilibili_request(song_data, queue_position=queue_position)
+        else:
+            text = (
+                f"{prefix}:\n"
+                f"来自于{platform_name}:\n"
+                f"歌曲: {song_data['name']}\n"
+                f"歌手: {song_data['artists']}\n"
+                f"专辑: {song_data['album']}\n"
+                f"时长: {song_data['duration']}"
+            )
 
         if bool(WEB_PLAYER_CONFIG.get("send_link_enabled", True)):
             link = self._get_web_link(area=song_data.get("area", ""))
@@ -1414,6 +1426,9 @@ class MusicHandler(PlaybackMixin):
     def _commit_song_request(self, song_data: dict, prefix: str = "") -> dict:
         """将已准备好的歌曲请求正式提交为播放或排队。prefix 用于自定义通知前缀。"""
         song_data = dict(song_data)
+        if song_data.get("platform") == "bilibili":
+            # Persist stable BV/page identity, never an expiring relay URL in pending items.
+            song_data["url"] = ""
 
         area = song_data.get("area", "")
         q = self._get_queue(area)
@@ -1431,6 +1446,12 @@ class MusicHandler(PlaybackMixin):
                 current_song = None
 
             if not is_playing and current_song is None and queue_length == 0:
+                if song_data.get("platform") == "bilibili":
+                    resolved = self._resolve_queued_song(song_data)
+                    if not resolved:
+                        provider = self.platforms.get("bilibili")
+                        return {"code": "error", "message": getattr(provider, "last_song_url_error", "") or "B站音轨解析失败"}
+                    song_data = resolved
                 song_data = dict(song_data)
                 play_uuid = str(uuid.uuid4())
                 song_data["play_uuid"] = play_uuid
@@ -1483,6 +1504,9 @@ class MusicHandler(PlaybackMixin):
             text = self._build_song_request_text(song_data, prefix=prefix)
         else:
             actual = pos + 1 + (1 if current_song or is_playing else 0)
-            text = self._build_song_request_text(song_data, prefix=prefix) + f"\n已加入队列 (位置: {actual})"
+            if song_data.get("platform") == "bilibili":
+                text = self._build_song_request_text(song_data, prefix=prefix, queue_position=pos + 1)
+            else:
+                text = self._build_song_request_text(song_data, prefix=prefix) + f"\n已加入队列 (位置: {actual})"
 
         return {"code": "success", "message": text, "attachments": attachments}

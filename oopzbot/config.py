@@ -93,12 +93,16 @@ class Settings:
     album_request_enabled: bool = False
     album_request_max_tracks: int = 30
     album_request_session_ttl_seconds: int = 300
+    bilibili_music_enabled: bool = True
+    bilibili_music_cookie: str = ""
 
     @classmethod
     def from_env(cls) -> Settings:
         music_base_url = _text("QQ_MUSIC_BASE_URL", "http://127.0.0.1:3200")
         managed_default = music_base_url.rstrip("/") == "http://127.0.0.1:3200"
         return cls(
+            bilibili_music_enabled=_boolean("BILIBILI_MUSIC_ENABLED", True),
+            bilibili_music_cookie=_text("BILIBILI_MUSIC_COOKIE"),
             qqbot_app_id=_text("QQBOT_APP_ID"),
             qqbot_app_secret=_text("QQBOT_APP_SECRET"),
             bridge_token=_text("QQBOT_BRIDGE_TOKEN"),

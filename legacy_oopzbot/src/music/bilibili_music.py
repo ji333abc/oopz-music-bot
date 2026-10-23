@@ -1,20 +1,22 @@
 """B 站音乐平台实现。
 
-使用 B 站公开搜索 API + 音频流提取。
-配置 BILIBILI_MUSIC_CONFIG.cookie 以获取更高音质。
+BV 视频使用自动访客身份、WBI 签名和流式音轨代理，保留音频区搜索兼容入口。
+BILIBILI_MUSIC_CONFIG.cookie 为可选登录态。
 """
 
 from __future__ import annotations
 
 import re
-import requests
 from http.cookies import SimpleCookie
 from typing import Optional
 from urllib.parse import quote
 
+import requests
 from core.constants import USER_AGENT
 from core.http_constants import HTTP_TIMEOUT_DEFAULT
 from core.logger_config import get_logger
+
+from oopzbot.bilibili import BilibiliVideoProvider, parse_video
 
 logger = get_logger("BilibiliMusic")
 
@@ -91,8 +93,10 @@ class BilibiliMusic:
 
     def __init__(self):
         cfg = _load_config()
-        self.enabled = cfg.get("enabled", False)
+        self.enabled = cfg.get("enabled", True)
         self.cookie = cfg.get("cookie", "")
+        self._video = BilibiliVideoProvider(self.cookie)
+        self.last_error = None
         self.last_song_url_error = ""
         self._session = requests.Session()
         self._session.headers.update(_HEADERS)
@@ -145,6 +149,8 @@ class BilibiliMusic:
         self.last_song_url_error = message
 
     def search(self, keyword: str, limit: int = 1) -> Optional[dict]:
+        if keyword.startswith(("BV", "bv", "http://", "https://")):
+            return self._video.get_song_detail(keyword)
         results = self._search_audio(keyword, limit)
         if results:
             return results[0]
@@ -154,6 +160,10 @@ class BilibiliMusic:
         return None
 
     def search_many(self, keyword: str, limit: int = 10, offset: int = 0) -> list[dict]:
+        if keyword.startswith(("BV", "bv", "http://", "https://")):
+            songs = self._video.search_many(keyword, limit=limit, offset=offset)
+            self.last_error = self._video.last_error
+            return songs
         page = (offset // max(limit, 1)) + 1
         results = self._search_audio(keyword, limit, page)
         if not results:
@@ -193,9 +203,9 @@ class BilibiliMusic:
                 self._set_last_error(f"B站无法获取音频链接: {sid}")
             return url
         if sid.startswith("BV") or sid.startswith("bv"):
-            url = self._get_video_audio_url(sid)
-            if not url and not self.last_song_url_error:
-                self._set_last_error(f"B站无法获取视频音频流: {sid}")
+            url = self._video.get_song_url(sid)
+            self.last_song_url_error = self._video.last_song_url_error
+            self.last_error = self._video.last_error
             return url
         return self._get_audio_url(sid) or self._get_video_audio_url(sid)
 
@@ -278,7 +288,10 @@ class BilibiliMusic:
     def get_song_detail(self, song_id) -> Optional[dict]:
         sid = str(song_id)
         if sid.startswith("BV") or sid.startswith("bv"):
-            return self._get_video_detail(sid)
+            song = self._video.get_song_detail(sid)
+            self.last_error = self._video.last_error
+            self.last_song_url_error = self._video.last_song_url_error
+            return song
         if sid.startswith("au"):
             sid = sid[2:]
         data = self._get(_API_AUDIO_INFO, params={"sid": sid})
@@ -325,6 +338,11 @@ class BilibiliMusic:
         return lyric if lyric and "[" in lyric else None
 
     def summarize(self, keyword: str) -> dict:
+        if keyword.startswith(("BV", "bv", "http://", "https://")):
+            result = self._video.summarize(keyword)
+            self.last_error = self._video.last_error
+            self.last_song_url_error = self._video.last_song_url_error
+            return result
         song = self.search(keyword)
         if not song:
             return {"code": "error", "message": f"B站未找到: {keyword}", "data": None}
@@ -340,6 +358,15 @@ class BilibiliMusic:
         return {"code": "success", "message": msg, "data": song}
 
     def summarize_by_id(self, song_id) -> dict:
+        try:
+            parse_video(str(song_id))
+        except ValueError:
+            pass
+        else:
+            result = self._video.summarize_by_id(song_id)
+            self.last_error = self._video.last_error
+            self.last_song_url_error = self._video.last_song_url_error
+            return result
         song = self.get_song_detail(song_id)
         if not song:
             return {"code": "error", "message": f"B站无法获取信息: {song_id}", "data": None}

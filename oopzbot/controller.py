@@ -8,6 +8,7 @@ import time
 from collections import deque
 
 from .application.search_cache import SearchCache, SearchDependencyError
+from .commands.formatter import format_bilibili_request
 from .config import Settings
 from .music import QQMusic
 from .runtime import NameFacade, OopzRuntime, SenderFacade, VoiceFacade
@@ -165,6 +166,10 @@ class MusicController:
         self.settings = settings
         self.runtime = runtime
         self.platforms = {"qq": QQMusic(settings)}
+        if settings.bilibili_music_enabled:
+            from .bilibili import BilibiliVideoProvider
+
+            self.platforms["bilibili"] = BilibiliVideoProvider(settings.bilibili_music_cookie)
         self.search_cache = SearchCache(
             enabled=settings.search_cache_enabled,
             ttl_seconds=settings.search_cache_ttl_seconds,
@@ -303,7 +308,7 @@ class MusicController:
         resolved_channel = channel or str(song.get("channel") or "")
         resolved_area = area or str(song.get("area") or "")
         resolved_user = user or str(song.get("user") or "")
-        if song.get("url"):
+        if song.get("url") and song.get("platform") != "bilibili":
             return dict(
                 song,
                 channel=resolved_channel,
@@ -335,7 +340,13 @@ class MusicController:
     def play_song_choice(self, song: dict, channel: str, area: str, user: str) -> dict:
         platform = str(song.get("platform") or "qq")
         try:
-            data = self._resolve_playable(song, platform, channel, area, user)
+            if platform == "bilibili":
+                data = self._build_song_data_from_platform_data(
+                    song, platform, str(song.get("id") or song.get("song_id") or ""), channel, area, user,
+                )
+            else:
+                data = self._resolve_playable(song, platform, channel, area, user)
+            result = self._commit_song_request(data, prefix="已点歌")
         except (KeyError, RuntimeError) as exc:
             message = str(exc) or "无法获取歌曲播放地址"
             self.notify_message(
@@ -344,7 +355,6 @@ class MusicController:
                 area=area,
             )
             return {"code": "error", "message": message}
-        result = self._commit_song_request(data, prefix="已点歌")
         self.notify_message(
             text=result["message"],
             channel=channel,
@@ -354,16 +364,26 @@ class MusicController:
 
     def _commit_song_request(self, song_data: dict, prefix: str = "已点歌") -> dict:
         queue = self._get_queue(song_data.get("area"))
+        pending_position = None
         with self._playback_lock:
+            if song_data.get("platform") == "bilibili":
+                song_data = dict(song_data, url="")
             if queue.get_current():
                 position = queue.add_to_queue(song_data)
+                pending_position = position
                 message = (
                     f"{prefix}：{song_data['name']} - {song_data['artists']}\n"
                     f"已加入队列，第 {position} 首"
                 )
             else:
+                if song_data.get("platform") == "bilibili":
+                    song_data = self._resolve_queued_song(
+                        song_data, song_data.get("channel", ""), song_data.get("area", ""), song_data.get("user", ""),
+                    )
                 self._start_song(song_data, queue)
                 message = f"{prefix}：{song_data['name']} - {song_data['artists']}"
+        if song_data.get("platform") == "bilibili":
+            message = format_bilibili_request(song_data, queue_position=pending_position)
         return {"code": "success", "message": message, "attachments": []}
 
     def _start_song(self, song: dict, queue: MusicQueue) -> None:
@@ -518,3 +538,6 @@ class MusicController:
             self.runtime.leave_voice()
         except Exception:
             logger.debug("关闭音乐控制器失败", exc_info=True)
+        provider = self.platforms.get("bilibili")
+        if provider:
+            provider.close()

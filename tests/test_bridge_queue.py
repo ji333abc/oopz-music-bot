@@ -572,6 +572,39 @@ class SearchResultTests(unittest.TestCase):
             ("稻香", "bilibili", "text", "area", "oopz-user"),
         )
 
+    def test_bv_command_routes_qq_panel_and_oopz_to_same_playback(self) -> None:
+        from oopzbot.domain.contracts import CommandRequest
+
+        music = _RecordingPlaybackMusic()
+        music.platforms = {"bilibili": object()}
+        for source in ("qq", "panel", "oopz"):
+            with self.subTest(source=source), patch.object(bridge, "_music_dependency", music), patch.object(
+                bridge, "_command_config", return_value=("area", "text", "voice", "bot")
+            ):
+                result = bridge._execute_request(CommandRequest(command="b站 https://www.bilibili.com/video/BV13x41117TL?p=2&share_source=copy", requester_id="user", source=source))
+                self.assertTrue(result.ok)
+                self.assertEqual(music.play_args[:2], ("BV13x41117TL?p=2", "bilibili"))
+
+    def test_invalid_or_disabled_bv_request_does_not_join_voice(self) -> None:
+        music = _RecordingPlaybackMusic()
+        music.platforms = {}
+        music.enter_voice_channel = unittest.mock.Mock()
+        with patch.object(bridge, "_music_dependency", music), patch.object(
+            bridge, "_command_config", return_value=("area", "text", "voice", "bot")
+        ):
+            for command in ("b站", "b站 wrong", "b站 BV13x41117TL"):
+                result = bridge._execute_command(command, "group:user")
+                self.assertFalse(result["ok"])
+        music.enter_voice_channel.assert_not_called()
+
+    def test_oopz_invalid_bv_request_receives_error_reply(self) -> None:
+        music = _RecordingPlaybackMusic()
+        with patch.object(bridge, "_music_dependency", music), patch.object(
+            bridge, "_command_config", return_value=("area", "text", "voice", "bot")
+        ), patch.object(bridge, "_notify_music") as notify:
+            self.assertTrue(bridge.dispatch_oopz_music_command("b站 wrong", "text", "area", "user"))
+        notify.assert_called_once()
+
     def test_failed_song_selection_is_reported_and_session_is_retained(self) -> None:
         music = _FailedPlaybackMusic()
         requester = "group:failed-selection"

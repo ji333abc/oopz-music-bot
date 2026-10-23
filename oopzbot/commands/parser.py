@@ -16,6 +16,7 @@ _PLAY_PREFIXES = (
     "唱",
 )
 _SEARCH_PREFIXES = ("搜索歌曲", "搜歌")
+_BILIBILI_REQUEST = re.compile(r"(?:b站|bilibili|bili)(?:\s+|[:：]\s*|$)(.*)", re.IGNORECASE)
 _PLATFORM_PREFIXES = (
     ("qq:", "qq"),
     ("qq：", "qq"),
@@ -40,11 +41,18 @@ def _argument_after_prefix(value: str, prefixes: tuple[str, ...]) -> str:
 
 
 def play_keyword(command: str) -> str:
+    if (value := bilibili_request(command)) is not None:
+        return f"bilibili:{value}"
     return _argument_after_prefix(command, _PLAY_PREFIXES)
 
 
+def bilibili_request(command: str) -> str | None:
+    match = _BILIBILI_REQUEST.fullmatch(str(command or "").strip())
+    return match.group(1).strip() if match else None
+
+
 def matches_play_command(command: str) -> bool:
-    return any(str(command or "").startswith(prefix) for prefix in _PLAY_PREFIXES)
+    return bilibili_request(command) is not None or any(str(command or "").startswith(prefix) for prefix in _PLAY_PREFIXES)
 
 
 def search_keyword(command: str) -> str:
@@ -59,6 +67,8 @@ def parse_platform_keyword(keyword: str, *, default: str = "qq") -> tuple[str, s
     """Parse legacy-compatible music prefixes without importing legacy code."""
 
     value = str(keyword or "").strip()
+    if (direct := bilibili_request(value)) is not None:
+        return "bilibili", direct
     lowered = value.lower()
     for prefix, platform in _PLATFORM_PREFIXES:
         if lowered.startswith(prefix):

@@ -137,7 +137,7 @@ QQ_MUSIC_CONFIG = {
 }
 
 BILIBILI_MUSIC_CONFIG = {
-    "enabled": _bool("BILIBILI_MUSIC_ENABLED", False),
+    "enabled": _bool("BILIBILI_MUSIC_ENABLED", True),
     "cookie": _text("BILIBILI_MUSIC_COOKIE"),
 }
 

@@ -173,7 +173,7 @@ CONFIG_FIELD_SCHEMA: dict[str, dict[str, dict]] = {
         "cookie": {"type": "str", "max_len": 3000, "sensitive": True, "expose_in_admin": True, "default": ""},
     },
     "bilibili_music": {
-        "enabled": {"type": "bool", "default": False},
+        "enabled": {"type": "bool", "default": True},
         "cookie": {"type": "str", "max_len": 3000, "sensitive": True, "expose_in_admin": True, "default": ""},
     },
     "message_stats": {

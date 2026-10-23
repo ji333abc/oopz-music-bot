@@ -4,8 +4,8 @@ import threading
 import time
 import unittest
 
-from oopzbot.config import Settings
 from oopzbot.application.search_cache import SearchDependencyError
+from oopzbot.config import Settings
 from oopzbot.controller import MusicController, MusicQueue
 from oopzbot.infrastructure.queue_adapter import LegacyQueueAdapter
 
@@ -224,6 +224,24 @@ class MusicControllerTests(unittest.TestCase):
         self.assertEqual(second["code"], "success")
         self.assertEqual(self.runtime.played, ["https://audio.invalid/first.mp3"])
         self.assertEqual(self.controller._get_queue("area").get_queue_length(), 1)
+
+    def test_bilibili_pending_items_resolve_only_when_they_start(self) -> None:
+        from unittest.mock import Mock
+
+        provider = Mock()
+        provider.last_error = None
+        provider.get_song_url.side_effect = ["http://127.0.0.1:1234/first", "http://127.0.0.1:1234/next"]
+        self.controller.platforms["bilibili"] = provider
+        song = {"id": "BV13x41117TL?p=2", "name": "视频", "artists": "UP主", "duration": 60000, "platform": "bilibili"}
+        self.assertEqual(self.controller.play_song_choice(song, "text", "area", "user")["code"], "success")
+        self._wait_for_play_count(1)
+        self.assertEqual(self.controller.play_song_choice(song, "text", "area", "user")["code"], "success")
+        self.assertEqual(provider.get_song_url.call_count, 1)
+        self.assertEqual(self.controller._get_queue("area").get_queue()[0]["url"], "")
+        self.controller.play_next("text", "area", "user")
+        self._wait_for_play_count(2)
+        self.assertEqual(provider.get_song_url.call_count, 2)
+        self.assertEqual(self.runtime.played[-1], "http://127.0.0.1:1234/next")
 
     def test_search_cache_is_shared_and_does_not_cache_play_urls(self) -> None:
         music = self.controller.platforms["qq"]

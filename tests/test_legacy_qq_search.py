@@ -7,9 +7,10 @@ from unittest.mock import Mock, patch
 
 import requests
 
+from oopzbot.application.search_cache import SearchCache
+
 # Reuse the bridge test's optional FastAPI shim for dependency-light test runs.
 from tests.test_bridge_queue import bridge
-from oopzbot.application.search_cache import SearchCache
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "legacy_oopzbot/src"))
