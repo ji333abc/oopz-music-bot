@@ -1,6 +1,9 @@
 from app.services.runtime import CommandRuntimeView, plugins_of, sender_of
 from domain.routing.command_registry import slash_of
 
+from oopzbot.commands.access import MUSIC_ACCESS_DENIED, music_user_blocked
+from oopzbot.commands.oopz import is_oopz_music_command
+
 from .builtin_command_actions import build_builtin_command_actions
 
 
@@ -127,6 +130,9 @@ class SlashCommandRouter:
         )
 
     def dispatch(self, content: str, channel: str, area: str, user: str) -> None:
+        if is_oopz_music_command(content) and music_user_blocked("oopz", user):
+            self._sender.send_message(MUSIC_ACCESS_DENIED, channel=channel, area=area)
+            return
         self._current_user = user
         parts = content.split()
         if not parts:

@@ -3,6 +3,9 @@ import re
 from app.services.runtime import CommandRuntimeView, plugins_of, sender_of
 from domain.routing.command_registry import mention_of
 
+from oopzbot.commands.access import MUSIC_ACCESS_DENIED, music_user_blocked
+from oopzbot.commands.oopz import is_oopz_music_command
+
 from .builtin_command_actions import build_builtin_command_actions
 
 
@@ -166,6 +169,9 @@ class MentionCommandRouter:
 
     def dispatch(self, text: str, channel: str, area: str, user: str) -> bool:
         """分发 @bot 命令。返回 True 表示该消息落入了 AI 聊天（用户消息不应被撤回）。"""
+        if is_oopz_music_command(text) and music_user_blocked("oopz", user):
+            self._sender.send_message(MUSIC_ACCESS_DENIED, channel=channel, area=area)
+            return False
         if self._plugins.try_dispatch_mention(
             text,
             channel,

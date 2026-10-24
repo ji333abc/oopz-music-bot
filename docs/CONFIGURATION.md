@@ -36,7 +36,35 @@ python scripts/init_config.py
 | `QQBOT_APP_SECRET` | 是 | QQ 开放平台机器人 App Secret |
 | `QQBOT_BRIDGE_TOKEN` | 是 | 初始化脚本自动生成 |
 | `QQBOT_ALLOWED_GROUP_OPENIDS` | 否 | 逗号分隔；为空表示不限制群 |
+| `QQBOT_MUSIC_BLOCKED_USER_OPENIDS` | 否 | 音乐用户黑名单；使用 QQ 用户 OpenID，逗号分隔，默认空 |
+| `OOPZ_MUSIC_BLOCKED_USER_UIDS` | 否 | 音乐用户黑名单；使用 OOPZ UID，逗号分隔，默认空 |
 | `QQBOT_COMMAND_DEFER_SECONDS` | 否 | 默认 `2.5`；命令超过该时长时转入后台等待，不发占位消息，只发送最终结果 |
+
+### 音乐用户黑名单
+
+默认允许所有用户使用音乐命令。将需要限制的用户加入 `.env`：
+
+```dotenv
+QQBOT_MUSIC_BLOCKED_USER_OPENIDS=qq_user_openid_1,qq_user_openid_2
+OOPZ_MUSIC_BLOCKED_USER_UIDS=oopz_user_uid_1,oopz_user_uid_2
+```
+
+两份名单相互独立，支持英文/中文逗号及空白分隔，按完整 ID 精确匹配；QQ 号码、昵称或群 OpenID 不能代替用户 OpenID。
+在对应 QQ 群或 OOPZ 文字频道发送 `@机器人 我的ID`，OOPZ 也可用 `/myid` 查询自己的 ID；QQ 命令日志中的 `requester_id` 同样是可配置的用户 OpenID，OOPZ UID 也可从后台成员资料取得。
+
+命中后禁止音乐点播（含 B站）、搜索和选歌、榜单/专辑、喜欢列表、状态/队列查询、暂停、继续、切歌、停止、音量及队列增删排序；旧版 OOPZ 斜杠别名和选歌按钮同样检查。黑名单中的用户仍可查询自己的 ID，不能通过管理员身份自动绕过限制。
+群白名单仍先检查；JM 下载继续使用其原有权限配置。已登录的 Panel 管理会话、自动切歌及其他用户的操作不受聊天用户黑名单影响，已有歌曲与队列不会因拉黑而自动删除。
+
+修改 `.env` 后需重新创建 Bot 容器以载入环境变量，并沿用当前部署的镜像（升级工具使用提交标签，不能直接退回默认 `local` 镜像）：
+
+```bash
+bot_container=$(docker compose ps -aq bot) &&
+bot_image=$(docker inspect --format '{{.Config.Image}}' "$bot_container") &&
+OOPZ_BOT_IMAGE="$bot_image" docker compose up -d --no-deps --no-build --force-recreate bot
+```
+
+单纯 `docker compose restart bot` 不会更新容器环境。原生部署修改所使用的环境文件后重启 Bot 服务。
+留空可恢复默认允许；首次启用须先更新并重建包含此功能的 Bot 镜像。权限拒绝返回 `ok=false`、`code=forbidden` 与 `error_kind=forbidden`。
 
 ## OOPZ 登录
 

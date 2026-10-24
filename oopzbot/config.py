@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import secrets
 from dataclasses import dataclass
 from functools import lru_cache
@@ -22,6 +23,10 @@ def _integer(name: str, default: int) -> int:
         return int(raw)
     except ValueError as exc:
         raise ValueError(f"{name} 必须是整数，当前值为 {raw!r}") from exc
+
+
+def _identifiers(name: str) -> frozenset[str]:
+    return frozenset(value for value in re.split(r"[,，\s]+", _text(name)) if value)
 
 
 def _boolean(name: str, default: bool = False) -> bool:
@@ -95,12 +100,16 @@ class Settings:
     album_request_session_ttl_seconds: int = 300
     bilibili_music_enabled: bool = True
     bilibili_music_cookie: str = ""
+    qqbot_music_blocked_user_openids: frozenset[str] = frozenset()
+    oopz_music_blocked_user_uids: frozenset[str] = frozenset()
 
     @classmethod
     def from_env(cls) -> Settings:
         music_base_url = _text("QQ_MUSIC_BASE_URL", "http://127.0.0.1:3200")
         managed_default = music_base_url.rstrip("/") == "http://127.0.0.1:3200"
         return cls(
+            qqbot_music_blocked_user_openids=_identifiers("QQBOT_MUSIC_BLOCKED_USER_OPENIDS"),
+            oopz_music_blocked_user_uids=_identifiers("OOPZ_MUSIC_BLOCKED_USER_UIDS"),
             bilibili_music_enabled=_boolean("BILIBILI_MUSIC_ENABLED", True),
             bilibili_music_cookie=_text("BILIBILI_MUSIC_COOKIE"),
             qqbot_app_id=_text("QQBOT_APP_ID"),

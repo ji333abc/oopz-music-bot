@@ -14,6 +14,7 @@ _MODERN_KINDS = {
     CommandKind.STOP,
     CommandKind.PAUSE,
     CommandKind.RESUME,
+    CommandKind.SELF_ID,
 }
 _LEGACY_ALIASES = {
     "列表": "队列",
@@ -114,4 +115,43 @@ def backend_notifies(command: str) -> bool:
         or exact_command_kind(command) in {CommandKind.NEXT, CommandKind.STOP}
         or _LIKED_COMMAND.fullmatch(command)
         or re.fullmatch(r"专辑点歌\s*\d+", command)
+    )
+
+
+def is_oopz_music_command(command: str) -> bool:
+    """Include legacy aliases even when extra arguments bypass normalization."""
+    stripped = str(command or "").strip()
+    if normalize_oopz_music_command(stripped) is not None:
+        return exact_command_kind(stripped) is not CommandKind.SELF_ID
+    parts = stripped.split()
+    if parts and parts[0].lower() in {
+        "/bf",
+        "/play",
+        "/next",
+        "/queue",
+        "/st",
+        "/stop",
+        "/like",
+        "/pick",
+        "/songsearch",
+        "/yun",
+        "/enter",
+        "/topsongs",
+        "/recentsongs",
+        "/点歌排行",
+        "/播放排行",
+        "/最近播放",
+    }:
+        return True
+    if exact_command_kind(stripped) in {
+        CommandKind.RANK_CATALOG,
+        CommandKind.VOICE_CHANNELS,
+        CommandKind.VOICE_MEMBERS,
+    }:
+        return True
+    return bool(
+        re.match(
+            r"(?:音量|移动|队列移动|清空队列|队列清空|榜单|排行榜|进入频道|点歌排行|播放排行|热歌榜|最近播放|播放历史)",
+            stripped,
+        )
     )

@@ -16,9 +16,11 @@ class CommandKind(StrEnum):
     VOICE_CHANNELS = "voice_channels"
     VOICE_MEMBERS = "voice_members"
     HELP = "help"
+    SELF_ID = "self_id"
 
 
 COMMAND_ALIASES: dict[CommandKind, frozenset[str]] = {
+    CommandKind.SELF_ID: frozenset({"我的ID", "我的id", "我的UID", "我的uid", "/myid"}),
     CommandKind.STATUS: frozenset({"状态", "当前播放", "播放状态"}),
     CommandKind.QUEUE: frozenset(
         {"队列", "播放队列", "待播", "面板", "队列面板", "播放面板"}

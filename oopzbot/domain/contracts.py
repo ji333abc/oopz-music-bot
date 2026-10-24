@@ -23,6 +23,7 @@ class ErrorKind(StrEnum):
     """Stable business error categories; messages remain user-facing text."""
 
     INVALID_INPUT = "invalid_input"
+    FORBIDDEN = "forbidden"
     NOT_INITIALIZED = "not_initialized"
     NOT_FOUND = "not_found"
     EXPIRED = "expired"

@@ -18,6 +18,7 @@ from .application.command_service import CommandService
 from .application.playback_service import PlaybackService
 from .application.queue_service import QueueConflictError, QueuePositionError, QueueService
 from .application.search_cache import SearchDependencyError
+from .commands.access import MUSIC_ACCESS_DENIED, music_request_blocked
 from .commands.formatter import format_queue, format_search, format_seconds, public_song_label
 from .commands.oopz import backend_notifies as _oopz_backend_notifies
 from .commands.oopz import normalize_oopz_music_command as _modern_oopz_music_command
@@ -97,6 +98,7 @@ _QQ_COMMON_RANK_IDS = (26, 27, 62, 4, 60, 28)
 
 _HELP_MESSAGE = """Music-bot 使用帮助
 所有命令都需要先 @机器人
+发送“我的ID”可查询自己的用户权限配置 ID。
 
 🎵 音乐播放
 ├─ 点歌 <歌名> / 播放 <歌名>
@@ -1468,6 +1470,17 @@ def _queue_album_tracks(
 
 
 def _execute_command_impl(request: CommandRequest) -> dict:
+    if exact_command_kind(request.command) is CommandKind.SELF_ID:
+        label = "OOPZ UID" if request.source == "oopz" else "QQ 用户 OpenID"
+        return {"ok": True, "message": f"你的{label}：{request.requester_id}"}
+    if music_request_blocked(request):
+        return {
+            "ok": False,
+            "code": "forbidden",
+            "error_kind": "forbidden",
+            "message": MUSIC_ACCESS_DENIED,
+            "backend_notified": False,
+        }
     with _command_lock:
         command = request.command
         requester_key = request.requester_key
@@ -1868,10 +1881,12 @@ def _execute_command(
     """Compatibility export for callers that still consume dictionaries."""
 
     requested_command_id = command_id or current_command_id()
+    group_openid, separator, requester_id = requester_key.rpartition(":")
     result = _execute_request(
         CommandRequest(
             command=command,
-            requester_id=requester_key,
+            requester_id=requester_id if separator else requester_key,
+            group_openid=group_openid if separator else "",
             source="compat",
             command_id=requested_command_id,
         )
@@ -1889,7 +1904,7 @@ def _execute_request(request: CommandRequest):
     service = CommandService(_execute_command_impl, logger=logger)
     timer = metrics.timer()
     stopped_item = None
-    if exact_command_kind(request.command) is CommandKind.STOP:
+    if exact_command_kind(request.command) is CommandKind.STOP and not music_request_blocked(request):
         try:
             music = _music_handler()
             area = _command_config(request)[0]
@@ -2036,6 +2051,8 @@ def dispatch_oopz_music_command(
     _command_event(normalized, payload, "OOPZ")
 
     backend_notified = _oopz_backend_notifies(normalized)
+    if payload.get("code") == "forbidden":
+        backend_notified = False
     if matches_play_command(normalized) and parse_platform_keyword(play_keyword(normalized))[0] == "bilibili":
         backend_notified = bool(payload.get("backend_notified"))
     if normalized.startswith("专辑点歌"):

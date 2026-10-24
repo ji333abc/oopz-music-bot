@@ -15,7 +15,9 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from oopzbot.application.search_cache import SearchDependencyError
+from oopzbot.commands.access import MUSIC_ACCESS_DENIED, music_user_blocked
 from oopzbot.commands.formatter import public_song_label
+from oopzbot.commands.registry import CommandKind, exact_command_kind
 
 logger = get_logger("QQBotBridge")
 router = APIRouter()
@@ -829,6 +831,16 @@ def _select_song(
 
 
 def _execute_command(command: str, requester_key: str) -> dict:
+    requester_id = requester_key.rsplit(":", 1)[-1]
+    if exact_command_kind(command) is CommandKind.SELF_ID:
+        return {"ok": True, "message": f"你的QQ 用户 OpenID：{requester_id}"}
+    if music_user_blocked("qq", requester_id):
+        return {
+            "ok": False,
+            "code": "forbidden",
+            "error_kind": "forbidden",
+            "message": MUSIC_ACCESS_DENIED,
+        }
     with _command_lock:
         music = _music_handler()
         if music is None:

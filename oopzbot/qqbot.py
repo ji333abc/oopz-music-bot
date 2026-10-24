@@ -15,11 +15,13 @@ import botpy
 import requests
 from botpy.message import GroupMessage
 
+from .commands.access import MUSIC_ACCESS_DENIED, music_user_blocked
 from .commands.formatter import (
     format_bilibili_request,
     public_song_label,
     public_song_metadata,
 )
+from .commands.registry import CommandKind, exact_command_kind
 from .jm.contracts import JMJob
 from .jm.queue import RedisJMQueue
 from .jm.service import JMTaskCoordinator
@@ -913,8 +915,9 @@ class OopzQQClient(botpy.Client):
         requester_name = str(getattr(author, "username", "") or "").strip()
 
         logger.info(
-            "收到群 @ 消息: group_openid=%s command=%r",
+            "收到群 @ 消息: group_openid=%s requester_id=%s command=%r",
             group_openid,
+            requester_id,
             command,
         )
 
@@ -970,6 +973,10 @@ class OopzQQClient(botpy.Client):
                     message,
                     f"普通文件发送失败：{exc}",
                 )
+            return
+
+        if exact_command_kind(command) is not CommandKind.SELF_ID and music_user_blocked("qq", requester_id):
+            await self._reply(message, MUSIC_ACCESS_DENIED)
             return
 
         bridge_task = asyncio.create_task(

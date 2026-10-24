@@ -7,6 +7,7 @@
 
 ### Added
 
+- QQ 与 OOPZ 支持独立的音乐用户黑名单，默认允许；配置的用户不能点歌、搜索选歌、控制播放、查看或修改队列，也不能通过旧斜杠别名和按钮绕过。新增“我的ID”与 OOPZ `/myid` 查询自身权限 ID。
 - QQ 群、OOPZ 文字频道与 Panel 命令支持 `b站 <BV号或标准视频链接>` 点播视频音轨及指定分P；默认自动获取匿名访客身份，无需手工配置账号 Cookie，复用现有播放队列与控制。
 - `oopzctl upgrade` 实时显示阶段进度条、当前操作和累计耗时，并流式输出 Git/Docker 日志；失败时显示回滚状态。进度写入 stderr，stdout 保留最终 JSON，管道日志使用普通行输出。
 - Panel 播放控制新增 0～100% 音量条，调整后保存到 Redis，语音重连和 Bot 重启后恢复。
@@ -56,12 +57,14 @@
 
 ### Security
 
+- 音乐用户权限在聊天入口和命令执行前检查，拒绝后不会加入语音或修改播放状态；配置黑名单时缺失用户身份的聊天音乐请求同样拒绝。已有群白名单与 JM 权限继续生效，Panel 管理会话独立鉴权。
 - B站封面不再预热、上传或复用缓存；播放通知也过滤升级前队列保存的附件，避免旧条目重新发布封面。未携带平台信息的旧 Web 点歌通知仅显示入队状态。
 - 新增的状态、诊断和历史数据在写盘及导出前统一限制容量并脱敏 URL、Cookie、Token 和用户标识。
 - JM worker 只接收 QQ App、Redis 和任务限制配置，不接收 OOPZ、QQMusic Cookie 或 Panel 密钥。
 
 ### Upgrade notes
 
+- 新增可选环境变量 `QQBOT_MUSIC_BLOCKED_USER_OPENIDS`（QQ 用户 OpenID）与 `OOPZ_MUSIC_BLOCKED_USER_UIDS`（OOPZ UID），默认空；需重建 Bot 镜像。修改 `.env` 后需沿用当前镜像设置 `OOPZ_BOT_IMAGE=<当前Bot镜像>` 并执行 `docker compose up -d --no-deps --no-build --force-recreate bot`（完整命令见配置说明），仅 restart 不载入新环境。无需迁移或额外备份；清空变量并重新创建 Bot 可关闭限制，版本回滚用 `./oopzctl rollback --release <升级前ID>`，旧版本不执行此黑名单。
 - B站公开回复精简需要重建并重启 Bot，无新配置、依赖或数据迁移，已有队列可保留。使用 `./oopzctl upgrade --ref codex/bilibili-video-audio --profile jm` 更新（未启用 JM 时移除 `--profile jm`）；回滚命令为 `./oopzctl rollback --release <升级前ID>`，回滚会恢复旧版元数据转发行为。
 - B站视频音源默认开启，可用 `BILIBILI_MUSIC_ENABLED=false` 关闭，`BILIBILI_MUSIC_COOKIE` 为可选登录态；无需新增依赖、公开端口或数据迁移。更新只需重建 Bot，旧后台显式保存的开关仍优先。回滚可切回升级前提交并重建 Bot；回滚前移除待播 B站条目，保留 Redis 与 `data/`。普通公开视频取流仍受服务器出口与视频访问权限影响。
 - 搜索接口修复需要重建 QQMusic 和 Bot 服务；无新增配置或凭证迁移，继续使用现有 Cookie 及自动续期。回滚可切回旧提交并重建这两个服务，但旧搜索接口可能仍返回 500。

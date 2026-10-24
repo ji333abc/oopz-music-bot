@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import unittest
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlsplit
@@ -190,6 +191,13 @@ class AudioRelayTests(unittest.TestCase):
                 "Accept-Ranges": "bytes",
             },
         )
+        closed = threading.Event()
+
+        def track_close():
+            if upstream.close.call_count >= 2:
+                closed.set()
+
+        upstream.close.side_effect = track_close
         getter = MagicMock(return_value=upstream)
         url = self.proxy(getter=getter).register(CDN)
         with requests.get(
@@ -212,7 +220,7 @@ class AudioRelayTests(unittest.TestCase):
         with requests.head(url, timeout=3) as result:
             self.assertEqual(result.status_code, 206)
             self.assertEqual(result.content, b"")
-        self.assertGreaterEqual(upstream.close.call_count, 2)
+        self.assertTrue(closed.wait(2), "GET and HEAD upstream responses were not released")
 
     def test_rejects_arbitrary_url_and_redirect_to_private_host(self):
         self.assertEqual(
