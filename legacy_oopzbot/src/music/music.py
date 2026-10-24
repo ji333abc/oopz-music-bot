@@ -26,7 +26,11 @@ from oopz.oopz_sender import OopzSender
 from web.web_link_token import clear_token, get_token, set_active_area
 
 from oopzbot.application.search_cache import SearchCache
-from oopzbot.commands.formatter import format_bilibili_request
+from oopzbot.commands.formatter import (
+    format_bilibili_request,
+    public_song_attachments,
+    public_song_label,
+)
 from oopzbot.config import get_settings
 
 logger = get_logger("Music")
@@ -749,7 +753,7 @@ class MusicHandler(PlaybackMixin):
             self._preload_next_song_if_any()
 
         text = self._build_now_playing_text("切换到下一首", next_song)
-        attachments = next_song.get("attachments", [])
+        attachments = public_song_attachments(next_song)
         self.sender.send_message(text=text, attachments=attachments, channel=channel, area=area)
         message = "已切换到下一首"
         if skipped:
@@ -762,7 +766,7 @@ class MusicHandler(PlaybackMixin):
         queue_list = q.get_queue(0, 9)
         if queue_list:
             total = q.get_queue_length()
-            lines = [f"{i}. {s['name']} - {s.get('artists', '未知')}" for i, s in enumerate(queue_list, 1)]
+            lines = [f"{i}. {public_song_label(s)}" for i, s in enumerate(queue_list, 1)]
             msg = "当前队列（前10首）:\n" + "\n".join(lines) + f"\n\n总计: {total} 首"
             self.sender.send_message(msg, channel=channel, area=area)
         else:
@@ -1301,6 +1305,8 @@ class MusicHandler(PlaybackMixin):
     _COVER_PREFETCH_TTL = 60.0
 
     def _cover_prefetch_key(self, song_data: dict) -> str | None:
+        if song_data.get("platform") == "bilibili":
+            return None
         cover = song_data.get("cover")
         song_id = song_data.get("song_id")
         if not cover or not song_id:
@@ -1363,6 +1369,8 @@ class MusicHandler(PlaybackMixin):
 
     def _resolve_song_attachments(self, song_data: dict) -> tuple[list, int | None, bool]:
         """在真正提交播放前再处理封面，避免失败请求也触发上传和写库。"""
+        if song_data.get("platform") == "bilibili":
+            return [], None, False
         attachments = list(song_data.get("attachments", []))
         image_cache_id = None
         cache_hit = False
@@ -1390,7 +1398,9 @@ class MusicHandler(PlaybackMixin):
 
     def _build_song_request_text(self, song_data: dict, prefix: str = "", queue_position: int | None = None) -> str:
         """统一构建点歌通知文本。prefix 为空时使用默认的 'XXX 点播了' 格式。"""
-        if not prefix and song_data.get("platform") != "bilibili":
+        if song_data.get("platform") == "bilibili":
+            return format_bilibili_request(song_data, queue_position=queue_position)
+        if not prefix:
             user_name = self.names.user(song_data.get("user", "")) if song_data.get("user") else "未知用户"
             prefix = f"{user_name} 点播了"
 
@@ -1400,17 +1410,14 @@ class MusicHandler(PlaybackMixin):
             "bilibili": "B站",
         }.get(song_data.get("platform"), "网易云")
 
-        if song_data.get("platform") == "bilibili":
-            text = format_bilibili_request(song_data, queue_position=queue_position)
-        else:
-            text = (
-                f"{prefix}:\n"
-                f"来自于{platform_name}:\n"
-                f"歌曲: {song_data['name']}\n"
-                f"歌手: {song_data['artists']}\n"
-                f"专辑: {song_data['album']}\n"
-                f"时长: {song_data['duration']}"
-            )
+        text = (
+            f"{prefix}:\n"
+            f"来自于{platform_name}:\n"
+            f"歌曲: {song_data['name']}\n"
+            f"歌手: {song_data['artists']}\n"
+            f"专辑: {song_data['album']}\n"
+            f"时长: {song_data['duration']}"
+        )
 
         if bool(WEB_PLAYER_CONFIG.get("send_link_enabled", True)):
             link = self._get_web_link(area=song_data.get("area", ""))
@@ -1429,6 +1436,7 @@ class MusicHandler(PlaybackMixin):
         if song_data.get("platform") == "bilibili":
             # Persist stable BV/page identity, never an expiring relay URL in pending items.
             song_data["url"] = ""
+            song_data["attachments"] = []
 
         area = song_data.get("area", "")
         q = self._get_queue(area)

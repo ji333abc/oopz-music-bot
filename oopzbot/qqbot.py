@@ -15,6 +15,11 @@ import botpy
 import requests
 from botpy.message import GroupMessage
 
+from .commands.formatter import (
+    format_bilibili_request,
+    public_song_label,
+    public_song_metadata,
+)
 from .jm.contracts import JMJob
 from .jm.queue import RedisJMQueue
 from .jm.service import JMTaskCoordinator
@@ -221,14 +226,19 @@ class OopzQQClient(botpy.Client):
     @staticmethod
     def _search_markdown(result: dict) -> str:
         songs = result.get("songs") or []
-        lines = ["# QQ音乐搜歌", ""]
+        heading = "# B站音源" if any(song.get("platform") == "bilibili" for song in songs) else "# QQ音乐搜歌"
+        lines = [heading, ""]
         for song in songs:
+            song = public_song_metadata(song)
             index = int(song.get("index") or 0)
             name = str(song.get("name") or "未知歌曲")
             artists = str(song.get("artists") or "未知歌手")
             duration = str(song.get("duration") or "")
             suffix = f" · {duration}" if duration else ""
-            lines.append(f"{index}. **{name}** — {artists}{suffix}")
+            if song.get("platform") == "bilibili":
+                lines.append(f"{index}. **{name}**{suffix}")
+            else:
+                lines.append(f"{index}. **{name}** — {artists}{suffix}")
         lines.extend(["", "> 5分钟内点击下方按钮选择歌曲"])
         return "\n".join(lines)
 
@@ -236,6 +246,7 @@ class OopzQQClient(botpy.Client):
     def _search_keyboard(result: dict, requester_id: str) -> dict:
         buttons = []
         for song in result.get("songs") or []:
+            song = public_song_metadata(song)
             index = int(song.get("index") or 0)
             name = str(song.get("name") or "未知歌曲")
             label = f"{index}. {name}"[:12]
@@ -276,18 +287,24 @@ class OopzQQClient(botpy.Client):
         if notice:
             lines.extend([f"> {notice}", ""])
         if current:
-            lines.append(
-                f"正在播放：**{current.get('name', '未知歌曲')}** — "
-                f"{current.get('artists', '未知歌手')}"
-            )
+            if current.get("platform") == "bilibili":
+                lines.append(f"正在播放：**{public_song_label(current)}**")
+            else:
+                lines.append(
+                    f"正在播放：**{current.get('name', '未知歌曲')}** — "
+                    f"{current.get('artists', '未知歌手')}"
+                )
         else:
             lines.append("正在播放：无")
         lines.extend(["", f"待播队列：{total} 首"])
         for item in items:
-            lines.append(
-                f"{item.get('index', 0)}. **{item.get('name', '未知歌曲')}** — "
-                f"{item.get('artists', '未知歌手')}"
-            )
+            if item.get("platform") == "bilibili":
+                lines.append(f"{item.get('index', 0)}. **{public_song_label(item)}**")
+            else:
+                lines.append(
+                    f"{item.get('index', 0)}. **{item.get('name', '未知歌曲')}** — "
+                    f"{item.get('artists', '未知歌手')}"
+                )
         if total > len(items):
             lines.append(f"……另有 {total - len(items)} 首")
         if items:
@@ -301,7 +318,7 @@ class OopzQQClient(botpy.Client):
                 "label": f"删 {item.get('index', '')}. {item.get('name', '未知歌曲')}",
                 "command": f"删除 {item.get('index', '')}",
             }
-            for item in (result.get("queue_items") or [])
+            for item in map(public_song_metadata, result.get("queue_items") or [])
         ]
         return self._command_keyboard(
             items,
@@ -479,6 +496,9 @@ class OopzQQClient(botpy.Client):
         proactive: bool = False,
     ) -> None:
         song = result.get("song") or {}
+        if song.get("platform") == "bilibili":
+            await self._reply(message, format_bilibili_request(song, status="已选择"), proactive=proactive)
+            return
         name = str(song.get("name") or "未知歌曲")
         artists = str(song.get("artists") or "未知歌手")
         album = str(song.get("album") or "未知专辑")

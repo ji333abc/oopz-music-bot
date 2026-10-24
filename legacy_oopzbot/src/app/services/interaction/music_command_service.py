@@ -1,8 +1,10 @@
 from typing import Optional
-from oopzbot.application.search_cache import SearchDependencyError
 
 from app.services.runtime import CommandRuntimeView, music_of, sender_of
 from music.music import parse_platform_prefix
+
+from oopzbot.application.search_cache import SearchDependencyError
+from oopzbot.commands.formatter import public_song_metadata
 
 
 class MusicCommandService:
@@ -61,6 +63,7 @@ class MusicCommandService:
         )
         lines = [f'搜歌 "{keyword}" - 找到 {len(results)} 首候选', "---"]
         for index, song in enumerate(items, 1):
+            song = public_song_metadata(song)
             lines.append(
                 f"  {index}. {song.get('name', '未知歌曲')} - {song.get('artists', '未知歌手')}"
                 f" [{song.get('durationText', '')}]"

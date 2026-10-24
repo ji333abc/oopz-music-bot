@@ -420,7 +420,9 @@ def add_song_to_queue(body: dict, area: str = "") -> dict:
     }
     r = get_redis()
     queue_len = QueueManager(area, redis_client=r).add_to_queue(song_data) + 1
-    notify = json.dumps({"name": name, "artists": artists, "position": queue_len}, ensure_ascii=False)
+    notify = json.dumps({"name": name, "artists": artists, "position": queue_len,
+                         "platform": platform, "song_id": str(song_id),
+                         "duration_ms": duration_ms, "duration": duration_text}, ensure_ascii=False)
     r.rpush(KEY_WEB_COMMANDS, f"notify:{notify}")
     return {"ok": True, "position": queue_len, "name": name}
 

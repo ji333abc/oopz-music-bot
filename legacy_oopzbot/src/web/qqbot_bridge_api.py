@@ -10,11 +10,12 @@ import time
 from threading import Lock
 
 import requests
+from core.logger_config import get_logger
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from core.logger_config import get_logger
 from oopzbot.application.search_cache import SearchDependencyError
+from oopzbot.commands.formatter import public_song_label
 
 logger = get_logger("QQBotBridge")
 router = APIRouter()
@@ -688,8 +689,6 @@ def _status_summary(music, area: str, voice_channel: str, bot_user: str) -> str:
 
     lines = ["Oopz Music 状态"]
     if current:
-        name = str(current.get("name") or "未知歌曲")
-        artists = str(current.get("artists") or "未知歌手")
         play_state = queue.get_play_state() or {}
         duration_seconds = float(current.get("duration_ms") or 0) / 1000
         if not duration_seconds:
@@ -706,7 +705,7 @@ def _status_summary(music, area: str, voice_channel: str, bot_user: str) -> str:
         lines.extend(
             [
                 "├─ 当前播放",
-                f"│  ├─ {name} - {artists}",
+                f"│  ├─ {public_song_label(current)}",
                 f"│  ├─ {_format_seconds(elapsed)} / {_format_seconds(duration_seconds)}",
                 f"│  └─ {state_text}",
             ]
@@ -727,8 +726,7 @@ def _queue_summary(music, area: str) -> str:
 
     if current:
         lines.append(
-            f"├─ 正在播放：{current.get('name', '未知歌曲')} - "
-            f"{current.get('artists', '未知歌手')}"
+            f"├─ 正在播放：{public_song_label(current)}"
         )
     else:
         lines.append("├─ 正在播放：无")
@@ -742,8 +740,7 @@ def _queue_summary(music, area: str) -> str:
     for index, song in enumerate(shown, 1):
         branch = "└─" if index == len(shown) and len(pending) <= 10 else "├─"
         lines.append(
-            f"   {branch} {index}. {song.get('name', '未知歌曲')} - "
-            f"{song.get('artists', '未知歌手')}"
+            f"   {branch} {index}. {public_song_label(song)}"
         )
     if len(pending) > 10:
         lines.append(f"   └─ ……另有 {len(pending) - 10} 首")

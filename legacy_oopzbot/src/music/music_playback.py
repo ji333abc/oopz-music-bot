@@ -14,6 +14,8 @@ from core.http_constants import HTTP_TIMEOUT_PROBE
 from core.logger_config import get_logger
 from web.web_link_token import ensure_token
 
+from oopzbot.commands.formatter import format_bilibili_request, public_song_attachments
+
 if TYPE_CHECKING:
     pass
 
@@ -237,7 +239,7 @@ class PlaybackMixin:
                                     text = self._build_now_playing_text("自动播放", next_song)
                                     self.sender.send_message(
                                         text=text,
-                                        attachments=next_song.get("attachments", []),
+                                        attachments=public_song_attachments(next_song),
                                         channel=ch,
                                         area=ar,
                                     )
@@ -407,6 +409,8 @@ class PlaybackMixin:
 
     def _build_now_playing_text(self, prefix: str, song_data: dict) -> str:
         """构建"正在播放"消息文本"""
+        if song_data.get("platform") == "bilibili":
+            return format_bilibili_request(song_data, status="正在播放")
         platform_name = {
             "netease": "网易云",
             "qq": "QQ音乐",

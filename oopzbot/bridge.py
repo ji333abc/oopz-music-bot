@@ -18,7 +18,7 @@ from .application.command_service import CommandService
 from .application.playback_service import PlaybackService
 from .application.queue_service import QueueConflictError, QueuePositionError, QueueService
 from .application.search_cache import SearchDependencyError
-from .commands.formatter import format_queue, format_search, format_seconds
+from .commands.formatter import format_queue, format_search, format_seconds, public_song_label
 from .commands.oopz import backend_notifies as _oopz_backend_notifies
 from .commands.oopz import normalize_oopz_music_command as _modern_oopz_music_command
 from .commands.parser import (
@@ -927,7 +927,7 @@ def _status_summary(
         lines.extend(
             [
                 "├─ 当前播放",
-                f"│  ├─ {current['name']} - {current['artists']}",
+                f"│  ├─ {public_song_label(current)}",
                 f"│  ├─ {_format_seconds(playback['progress'])} / "
                 f"{_format_seconds(playback['duration'])}",
                 f"│  └─ {state_text}",
@@ -1034,7 +1034,7 @@ def _remove_queue_items(
             return {"ok": False, "message": "待播队列为空，没有可删除的歌曲"}
         return {"ok": False, "message": f"编号超出范围，请输入 1-{length}"}
 
-    names = "、".join(song.song.name for song in removed)
+    names = "、".join(public_song_label(song.song) if song.song.platform == "bilibili" else song.song.name for song in removed)
     return _queue_panel(music, area, f"已删除 {len(removed)} 首：{names}")
 
 
@@ -1135,7 +1135,7 @@ def _select_song(
     return {
         "ok": True,
         "reply_type": "song_selected",
-        "message": f"已选择：{song.get('name', '未知歌曲')} - {song.get('artists', '未知歌手')}",
+        "message": f"已选择：{public_song_label(song)}",
         "song": _qq_song_payload(song),
     }
 

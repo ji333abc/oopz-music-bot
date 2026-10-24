@@ -232,7 +232,7 @@ class MusicControllerTests(unittest.TestCase):
         provider.last_error = None
         provider.get_song_url.side_effect = ["http://127.0.0.1:1234/first", "http://127.0.0.1:1234/next"]
         self.controller.platforms["bilibili"] = provider
-        song = {"id": "BV13x41117TL?p=2", "name": "视频", "artists": "UP主", "duration": 60000, "platform": "bilibili"}
+        song = {"id": "BV13x41117TL?p=2", "name": "PRIVATE_TITLE", "artists": "PRIVATE_UPLOADER", "duration": 60000, "platform": "bilibili"}
         self.assertEqual(self.controller.play_song_choice(song, "text", "area", "user")["code"], "success")
         self._wait_for_play_count(1)
         self.assertEqual(self.controller.play_song_choice(song, "text", "area", "user")["code"], "success")
@@ -242,6 +242,11 @@ class MusicControllerTests(unittest.TestCase):
         self._wait_for_play_count(2)
         self.assertEqual(provider.get_song_url.call_count, 2)
         self.assertEqual(self.runtime.played[-1], "http://127.0.0.1:1234/next")
+        for text, _area, _channel in self.runtime.messages:
+            self.assertNotIn("PRIVATE_TITLE", text)
+            self.assertNotIn("PRIVATE_UPLOADER", text)
+            self.assertIn("BV13x41117TL", text)
+        self.assertEqual(self.controller._get_queue("area").get_current()["name"], "PRIVATE_TITLE")
 
     def test_search_cache_is_shared_and_does_not_cache_play_urls(self) -> None:
         music = self.controller.platforms["qq"]

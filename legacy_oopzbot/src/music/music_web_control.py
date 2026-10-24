@@ -7,6 +7,8 @@ from core.database import SongCache, Statistics
 from core.logger_config import get_logger
 from core.redis_keys import VOLUME as KEY_VOLUME
 
+from oopzbot.commands.formatter import format_bilibili_request, public_song_attachments
+
 logger = get_logger("MusicWebControl")
 
 
@@ -142,7 +144,7 @@ class WebControlExecutor:
             text = h._build_now_playing_text("切换到下一首", next_song)
             h.sender.send_message(
                 text=text,
-                attachments=next_song.get("attachments", []),
+                attachments=public_song_attachments(next_song),
                 channel=next_song["channel"],
                 area=next_song["area"],
             )
@@ -258,6 +260,11 @@ class WebControlExecutor:
                 logger.debug(f"读取播放状态失败，按队列位置展示: {e}")
         actual = max(1, pos_int + (1 if has_current else 0))
         text = f"[Web 点歌] {name} - {artists}\n已加入队列 (位置: {actual})"
+        if info.get("platform") == "bilibili":
+            text = format_bilibili_request(info, queue_position=max(1, pos_int))
+        elif not info.get("platform"):
+            # Notifications queued before the upgrade have no platform identity.
+            text = f"[Web 点歌] 已加入队列 (位置: {actual})"
         try:
             self.h.sender.send_message(text, channel=ch, area=ar)
         except Exception as e:

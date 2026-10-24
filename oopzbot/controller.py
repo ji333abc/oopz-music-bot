@@ -8,7 +8,7 @@ import time
 from collections import deque
 
 from .application.search_cache import SearchCache, SearchDependencyError
-from .commands.formatter import format_bilibili_request
+from .commands.formatter import format_bilibili_request, public_song_label
 from .config import Settings
 from .music import QQMusic
 from .runtime import NameFacade, OopzRuntime, SenderFacade, VoiceFacade
@@ -477,7 +477,9 @@ class MusicController:
                 return {"code": "success", "message": "队列已空"}
             self._start_song(next_song, queue)
             self.notify_message(
-                text=f"正在播放：{next_song['name']} - {next_song['artists']}",
+                text=(format_bilibili_request(next_song, status="正在播放")
+                      if next_song.get("platform") == "bilibili"
+                      else f"正在播放：{public_song_label(next_song)}"),
                 channel=channel,
                 area=area,
             )
